@@ -1,0 +1,303 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                                                                              ║
+║         🔍 ELASTICSEARCH SECURITY SCANNER v2.0 - INSTALLATION GUIDE          ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+📦 PACKAGE CONTENTS:
+═══════════════════════════════════════════════════════════════════════════════
+
+CORE SCRIPTS:
+├── es_advanced_scanner.py      - Main scanner (multi-port, detection engine)
+├── es_deep_inspector.py        - Deep analysis tool (indices, mappings, PII)
+├── es_results_analyzer.py      - Results processor & filter
+├── scan.sh                     - Convenient wrapper script
+└── automated_pipeline.sh       - Full automated workflow
+
+DOCUMENTATION:
+├── README.md                   - Complete documentation (read this!)
+├── USAGE.txt                   - Quick reference guide
+└── INSTALL.txt                 - This file
+
+EXAMPLES:
+└── example_targets.csv         - Sample CSV file
+
+
+🚀 QUICK INSTALLATION (5 MINUTES):
+═══════════════════════════════════════════════════════════════════════════════
+
+Step 1: Extract files
+─────────────────────────────────────────────────────────────────────────────
+mkdir ~/elasticsearch-scanner
+cd ~/elasticsearch-scanner
+# Copy all files here
+
+
+Step 2: Install dependencies
+─────────────────────────────────────────────────────────────────────────────
+pip install requests --break-system-packages
+
+# Or if that fails:
+pip3 install requests
+
+
+Step 3: Make scripts executable
+─────────────────────────────────────────────────────────────────────────────
+chmod +x *.py *.sh
+
+
+Step 4: Test installation
+─────────────────────────────────────────────────────────────────────────────
+./scan.sh
+# Should show help message
+
+python3 es_advanced_scanner.py --help
+# Should show scanner options
+
+
+Step 5: Run first scan
+─────────────────────────────────────────────────────────────────────────────
+# Use the example file
+./scan.sh normal example_targets.csv
+
+# Or with your own file
+./scan.sh normal your_targets.csv
+
+
+✅ INSTALLATION COMPLETE!
+
+
+🔧 SYSTEM REQUIREMENTS:
+═══════════════════════════════════════════════════════════════════════════════
+
+Required:
+  ✓ Python 3.7+
+  ✓ pip / pip3
+  ✓ requests library
+
+Optional (recommended):
+  ✓ jq - for JSON processing
+  ✓ tmux/screen - for long-running scans
+
+Tested on:
+  ✓ Ubuntu 20.04 / 22.04 / 24.04
+  ✓ Debian 10 / 11 / 12
+  ✓ Kali Linux 2023+
+  ✓ macOS 12+ (with python3 from homebrew)
+
+
+📋 DIFFERENT INSTALLATION METHODS:
+═══════════════════════════════════════════════════════════════════════════════
+
+Method 1: Standard (recommended)
+─────────────────────────────────────────────────────────────────────────────
+pip install requests --break-system-packages
+chmod +x *.py *.sh
+./scan.sh normal targets.csv
+
+
+Method 2: Virtual Environment
+─────────────────────────────────────────────────────────────────────────────
+python3 -m venv venv
+source venv/bin/activate
+pip install requests
+python3 es_advanced_scanner.py -i targets.csv
+
+
+Method 3: Using pipx (isolated environment)
+─────────────────────────────────────────────────────────────────────────────
+sudo apt install pipx
+pipx install requests
+python3 es_advanced_scanner.py -i targets.csv
+
+
+Method 4: Docker (coming soon)
+─────────────────────────────────────────────────────────────────────────────
+# Future feature
+docker run -v $(pwd):/data elasticsearch-scanner targets.csv
+
+
+🎯 FIRST RUN CHECKLIST:
+═══════════════════════════════════════════════════════════════════════════════
+
+Before first scan:
+  [ ] Python 3.7+ installed (check: python3 --version)
+  [ ] requests library installed (check: python3 -c "import requests")
+  [ ] Scripts are executable (check: ls -la *.py *.sh)
+  [ ] Have valid CSV with targets
+  [ ] Read USAGE.txt for basic commands
+  [ ] Read README.md for full documentation
+
+During first scan:
+  [ ] Start with small CSV (10-50 targets) to test
+  [ ] Use normal mode: ./scan.sh normal test.csv
+  [ ] Monitor output for errors
+  [ ] Check created files in scan_TIMESTAMP/ directory
+
+After first scan:
+  [ ] Review scan_results.txt for overview
+  [ ] Check critical_findings.txt for high-severity issues
+  [ ] Examine results.json for programmatic access
+  [ ] Read report.md for formatted summary
+
+
+🐛 TROUBLESHOOTING:
+═══════════════════════════════════════════════════════════════════════════════
+
+Issue: "command not found: python3"
+Solution:
+  Ubuntu/Debian: sudo apt install python3
+  macOS: brew install python3
+
+Issue: "No module named 'requests'"
+Solution:
+  pip3 install requests --break-system-packages
+  # Or: pip install requests
+  # Or: sudo apt install python3-requests
+
+Issue: "Permission denied"
+Solution:
+  chmod +x es_advanced_scanner.py
+  chmod +x scan.sh
+  # Or run with: python3 es_advanced_scanner.py
+
+Issue: "No targets found in CSV"
+Solution:
+  - Check CSV format (see USAGE.txt)
+  - Try different delimiter: --delimiter ";"
+  - Verify file encoding: file -i targets.csv
+
+Issue: Scripts are slow
+Solution:
+  - Increase workers: -w 100
+  - Decrease timeout: -t 5
+  - Use fast mode: ./scan.sh fast targets.csv
+
+Issue: Too many timeouts
+Solution:
+  - Decrease workers: -w 10
+  - Increase timeout: -t 20
+  - Use thorough mode in pipeline
+
+Issue: SSL/TLS errors
+Solution:
+  Scripts automatically ignore SSL verification (verify=False)
+  This is intentional for security testing
+
+
+⚙️ ADVANCED CONFIGURATION:
+═══════════════════════════════════════════════════════════════════════════════
+
+Customize detection rules:
+─────────────────────────────────────────────────────────────────────────────
+Edit DETECTION_RULES in es_advanced_scanner.py
+
+Add custom ports:
+─────────────────────────────────────────────────────────────────────────────
+Edit COMMON_PORTS in es_advanced_scanner.py
+
+Adjust timeouts:
+─────────────────────────────────────────────────────────────────────────────
+Use -t parameter or edit timeout values in scripts
+
+Modify sample size:
+─────────────────────────────────────────────────────────────────────────────
+Use --sample-size parameter (default: 500)
+
+
+📚 NEXT STEPS AFTER INSTALLATION:
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Read USAGE.txt for quick reference
+2. Read README.md for complete documentation
+3. Test with example_targets.csv
+4. Run your first real scan
+5. Use automated_pipeline.sh for full workflow
+6. Customize detection rules for your needs
+7. Integrate results with your reporting tools
+
+
+🔐 SECURITY NOTES:
+═══════════════════════════════════════════════════════════════════════════════
+
+⚠️  IMPORTANT:
+  - Use ONLY on authorized targets
+  - Results may contain sensitive data - protect them
+  - Do not share credentials or API keys found
+  - Comply with local laws and regulations
+  - Get written permission before scanning
+
+💡 BEST PRACTICES:
+  - Start with small target lists
+  - Use appropriate thread counts for your network
+  - Monitor your bandwidth usage
+  - Set reasonable timeouts
+  - Keep results encrypted
+  - Report critical findings immediately
+  - Document your scanning activities
+
+
+📞 GETTING HELP:
+═══════════════════════════════════════════════════════════════════════════════
+
+Documentation:
+  1. USAGE.txt - Quick commands and examples
+  2. README.md - Full documentation
+  3. Script help: python3 es_advanced_scanner.py --help
+
+Common workflows:
+  - Quick scan: ./scan.sh quick targets.csv
+  - Full analysis: ./automated_pipeline.sh targets.csv
+  - Deep dive: ./scan.sh deep http://target:9200
+
+Check output files:
+  - scan_results.txt for overview
+  - critical_findings.txt for urgent issues
+  - results.json for programmatic access
+
+
+🎓 LEARNING RESOURCES:
+═══════════════════════════════════════════════════════════════════════════════
+
+Understanding results:
+  - See "Understanding Severity Score" in USAGE.txt
+  - See "Detection Types" in README.md
+
+Working with outputs:
+  - See "Useful Commands" in USAGE.txt
+  - See "Integration with jq" in README.md
+
+Customization:
+  - See "Extending Detections" in README.md
+  - See "Advanced Configuration" above
+
+
+✅ POST-INSTALLATION CHECKLIST:
+═══════════════════════════════════════════════════════════════════════════════
+
+  [ ] All dependencies installed
+  [ ] Scripts are executable
+  [ ] Test scan completed successfully
+  [ ] Documentation reviewed
+  [ ] Understand output formats
+  [ ] Know how to filter results
+  [ ] Security guidelines understood
+  [ ] Ready for production use
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+🎉 INSTALLATION COMPLETE!
+
+You're ready to start scanning. Begin with:
+
+  ./scan.sh normal your_targets.csv
+
+Or for full automated workflow:
+
+  ./automated_pipeline.sh your_targets.csv
+
+Happy Hunting! 🎯
+
+═══════════════════════════════════════════════════════════════════════════════
