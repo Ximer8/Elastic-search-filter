@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Elasticsearch Scanner Results Analyzer
+Scanner Results Analyzer
 Утилита для анализа и фильтрации результатов сканирования
 """
 
@@ -29,6 +29,11 @@ def filter_by_detection(results: List[Dict], detection_type: str) -> List[Dict]:
     return [r for r in results if detection_type in r["detected_rules"]]
 
 
+def filter_by_module(results: List[Dict], module_name: str) -> List[Dict]:
+    """Фильтрует по модулю сканирования"""
+    return [r for r in results if r.get("module", "elasticsearch") == module_name]
+
+
 def group_by_cluster(results: List[Dict]) -> Dict[str, List[Dict]]:
     """Группирует по кластерам"""
     clusters = defaultdict(list)
@@ -49,6 +54,11 @@ def get_statistics(results: List[Dict]) -> Dict:
             "low": len([r for r in results if r["severity_score"] < 10])
         },
         "detections": defaultdict(int),
+        "ransomware_notes": 0,
+        "modules": defaultdict(int),
+        "module_critical": defaultdict(int),
+        "environments": defaultdict(int),
+        "environment_critical": defaultdict(int),
         "clusters": set(),
         "versions": defaultdict(int),
         "total_indices": 0,
@@ -56,9 +66,22 @@ def get_statistics(results: List[Dict]) -> Dict:
     }
     
     for r in results:
+        module_name = r.get("module", "elasticsearch")
+        stats["modules"][module_name] += 1
+        if r["severity_score"] >= 30:
+            stats["module_critical"][module_name] += 1
+
         # Детекции
         for det in r["detected_rules"]:
             stats["detections"][det] += 1
+            if det == "ransomware_note":
+                stats["ransomware_notes"] += 1
+
+        # Окружения
+        environment = r.get("environment", "unknown") or "unknown"
+        stats["environments"][environment] += 1
+        if r["severity_score"] >= 30:
+            stats["environment_critical"][environment] += 1
         
         # Кластеры
         if r.get("cluster_name"):
@@ -77,6 +100,10 @@ def get_statistics(results: List[Dict]) -> Dict:
     
     stats["clusters"] = len(stats["clusters"])
     stats["detections"] = dict(stats["detections"])
+    stats["modules"] = dict(stats["modules"])
+    stats["module_critical"] = dict(stats["module_critical"])
+    stats["environments"] = dict(stats["environments"])
+    stats["environment_critical"] = dict(stats["environment_critical"])
     stats["versions"] = dict(stats["versions"])
     
     return stats
@@ -96,20 +123,29 @@ def export_detailed_csv(results: List[Dict], output: str):
     with open(output, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([
-            "URL", "Host", "Port", "Scheme", "Cluster", "Version", 
-            "Indices", "Severity", "Detections", "Response Time"
+            "Module", "URL", "Host", "Port", "Scheme", "Cluster", "Version", 
+            "Environment", "Env Confidence", "Indices", "Severity",
+            "Priority", "FP Confidence", "Owner Contacts", "Ransomware Note",
+            "Detections", "Response Time"
         ])
         
         for r in results:
             writer.writerow([
+                r.get("module", "elasticsearch"),
                 r["url"],
                 r["host"],
                 r["port"],
                 r["scheme"],
                 r.get("cluster_name", ""),
                 r.get("version", ""),
+                r.get("environment", "unknown"),
+                r.get("environment_confidence", 0),
                 r.get("indices_count", 0),
                 r["severity_score"],
+                r.get("notification_priority", ""),
+                r.get("false_positive_confidence", ""),
+                ",".join((r.get("owner") or {}).get("contacts", [])),
+                "yes" if "ransomware_note" in r.get("detected_rules", []) else "no",
                 ",".join(r["detected_rules"]),
                 f"{r.get('response_time', 0):.2f}"
             ])
@@ -132,12 +168,26 @@ def print_statistics(stats: Dict):
     print(f"\n🔍 Top Detections:")
     for det, count in sorted(stats["detections"].items(), key=lambda x: -x[1])[:10]:
         print(f"  {det}: {count}")
+
+    print(f"\n🧨 Ransomware note findings: {stats['ransomware_notes']}")
+
+    print(f"\n🧩 Modules:")
+    for module_name, count in sorted(stats["modules"].items(), key=lambda x: x[0]):
+        critical = stats["module_critical"].get(module_name, 0)
+        print(f"  {module_name}: {count} hosts ({critical} critical)")
+
+    print(f"\n🏷️  Environment Split:")
+    for env in ["production", "test", "unknown"]:
+        total = stats["environments"].get(env, 0)
+        critical = stats["environment_critical"].get(env, 0)
+        print(f"  {env}: {total} hosts ({critical} critical)")
     
     print(f"\n🖥️  Unique clusters: {stats['clusters']}")
     
-    print(f"\n📦 Elasticsearch Versions:")
-    for ver, count in sorted(stats["versions"].items(), key=lambda x: -x[1])[:10]:
-        print(f"  {ver}: {count}")
+    if stats["versions"]:
+        print(f"\n📦 Elasticsearch Versions:")
+        for ver, count in sorted(stats["versions"].items(), key=lambda x: -x[1])[:10]:
+            print(f"  {ver}: {count}")
     
     print(f"\n📊 Total indices: {stats['total_indices']}")
     print(f"⏱️  Avg response time: {stats['avg_response_time']:.2f}s")
@@ -149,10 +199,18 @@ def generate_markdown_report(results: List[Dict], stats: Dict, output: str):
     """Генерирует Markdown отчет"""
     lines = []
     
-    lines.append("# Elasticsearch Security Scan Report\n")
+    lines.append("# Modular Security Scan Report\n")
     lines.append(f"**Total Hosts Scanned:** {stats['total']}\n")
     lines.append(f"**Total Indices:** {stats['total_indices']}\n")
     lines.append(f"**Unique Clusters:** {stats['clusters']}\n\n")
+    lines.append(f"**Ransomware Note Findings:** {stats['ransomware_notes']}\n\n")
+
+    lines.append("## 🧩 Modules\n")
+    lines.append("| Module | Hosts | Critical |")
+    lines.append("|--------|-------|----------|")
+    for module_name, count in sorted(stats["modules"].items(), key=lambda x: x[0]):
+        lines.append(f"| {module_name} | {count} | {stats['module_critical'].get(module_name, 0)} |")
+    lines.append("")
     
     lines.append("## 📊 Severity Distribution\n")
     lines.append("| Severity | Count | Percentage |")
@@ -161,6 +219,49 @@ def generate_markdown_report(results: List[Dict], stats: Dict, output: str):
     for sev, count in stats['by_severity'].items():
         pct = (count / total * 100) if total > 0 else 0
         lines.append(f"| {sev.capitalize()} | {count} | {pct:.1f}% |")
+    lines.append("")
+
+    lines.append("## 🏷️ Environment Split\n")
+    lines.append("| Environment | Hosts | Critical |")
+    lines.append("|-------------|-------|----------|")
+    for env in ["production", "test", "unknown"]:
+        lines.append(
+            f"| {env} | {stats['environments'].get(env, 0)} | "
+            f"{stats['environment_critical'].get(env, 0)} |"
+        )
+    lines.append("")
+
+    lines.append("## 🧨 Possible Ransomware Notes\n")
+    ransomware = [r for r in results if "ransomware_note" in r.get("detected_rules", [])]
+    if ransomware:
+        lines.append("| Module | URL | Environment | Score | Cluster | Matched |")
+        lines.append("|--------|-----|-------------|-------|---------|---------|")
+        for r in sorted(ransomware, key=lambda x: -x["severity_score"])[:30]:
+            matched = ", ".join(
+                r.get("sample_data", {}).get("ransomware_note", {}).get("matched", [])[:5]
+            )
+            lines.append(
+                f"| {r.get('module', 'elasticsearch')} | {r['url']} | {r.get('environment', 'unknown')} | "
+                f"{r['severity_score']} | {r.get('cluster_name', '')} | {matched} |"
+            )
+    else:
+        lines.append("*No ransomware notes detected*")
+    lines.append("")
+
+    lines.append("## Laravel Debug Findings\n")
+    laravel_debug = [r for r in results if r.get("module") == "laravel_debug"]
+    if laravel_debug:
+        lines.append("| URL | Environment | Score | Priority | FP Confidence | Owner Contact | Detections |")
+        lines.append("|-----|-------------|-------|----------|---------------|---------------|------------|")
+        for r in sorted(laravel_debug, key=lambda x: -x["severity_score"])[:30]:
+            owner_contacts = (r.get("owner") or {}).get("contacts", [])
+            lines.append(
+                f"| {r['url']} | {r.get('environment', 'unknown')} | {r['severity_score']} | "
+                f"{r.get('notification_priority', '')} | {r.get('false_positive_confidence', '')} | "
+                f"{owner_contacts[0] if owner_contacts else ''} | {', '.join(r.get('detected_rules', [])[:6])} |"
+            )
+    else:
+        lines.append("*No Laravel debug findings*")
     lines.append("")
     
     lines.append("## 🔍 Top Detections\n")
@@ -173,20 +274,26 @@ def generate_markdown_report(results: List[Dict], stats: Dict, output: str):
     lines.append("## 🔴 Critical Findings (Score ≥ 50)\n")
     critical = [r for r in results if r["severity_score"] >= 50]
     if critical:
-        lines.append("| URL | Score | Indices | Detections |")
-        lines.append("|-----|-------|---------|------------|")
+        lines.append("| Module | URL | Score | Indices | Detections |")
+        lines.append("|--------|-----|-------|---------|------------|")
         for r in sorted(critical, key=lambda x: -x["severity_score"])[:20]:
             dets = ", ".join(r["detected_rules"][:5])
-            lines.append(f"| {r['url']} | {r['severity_score']} | {r['indices_count']} | {dets} |")
+            lines.append(
+                f"| {r.get('module', 'elasticsearch')} | {r['url']} | "
+                f"{r['severity_score']} | {r.get('indices_count', 0)} | {dets} |"
+            )
     else:
         lines.append("*No critical findings*")
     lines.append("")
     
     lines.append("## 📦 Elasticsearch Versions\n")
-    lines.append("| Version | Count |")
-    lines.append("|---------|-------|")
-    for ver, count in sorted(stats["versions"].items(), key=lambda x: -x[1])[:10]:
-        lines.append(f"| {ver} | {count} |")
+    if stats["versions"]:
+        lines.append("| Version | Count |")
+        lines.append("|---------|-------|")
+        for ver, count in sorted(stats["versions"].items(), key=lambda x: -x[1])[:10]:
+            lines.append(f"| {ver} | {count} |")
+    else:
+        lines.append("*No Elasticsearch versions in this result set*")
     lines.append("")
     
     with open(output, "w", encoding="utf-8") as f:
@@ -195,7 +302,7 @@ def generate_markdown_report(results: List[Dict], stats: Dict, output: str):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Анализ и фильтрация результатов Elasticsearch сканирования",
+        description="Анализ и фильтрация результатов модульного сканирования",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Примеры использования:
@@ -226,6 +333,7 @@ def main():
     # Фильтры
     ap.add_argument("--min-score", type=int, help="Минимальный severity score")
     ap.add_argument("--detection", help="Фильтр по типу детекции")
+    ap.add_argument("--module", help="Фильтр по модулю сканирования")
     
     # Экспорт
     ap.add_argument("--export-urls", help="Экспорт только URL в файл")
@@ -252,6 +360,10 @@ def main():
     if args.detection:
         filtered = filter_by_detection(filtered, args.detection)
         print(f"[*] After detection filter ('{args.detection}'): {len(filtered)} results")
+
+    if args.module:
+        filtered = filter_by_module(filtered, args.module)
+        print(f"[*] After module filter ('{args.module}'): {len(filtered)} results")
     
     # Статистика
     if args.stats or not any([args.output, args.export_urls, args.export_csv, args.markdown_report]):

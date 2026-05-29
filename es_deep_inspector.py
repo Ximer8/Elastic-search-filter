@@ -15,6 +15,15 @@ import requests
 requests.packages.urllib3.disable_warnings()
 
 
+RANSOMWARE_NOTE_KEYWORDS = [
+    "ransom", "ransomware", "your files are encrypted", "all your files",
+    "all your data", "decrypt", "decryption", "decryptor", "restore your files",
+    "recover your files", "recover your data", "pay ransom", "tor browser",
+    ".onion", "read_me", "read-me", "how_to_decrypt", "how-to-decrypt",
+    "help_decrypt", "decrypt_instructions", "encrypted by"
+]
+
+
 class ElasticsearchDeepInspector:
     """Глубокий анализатор Elasticsearch"""
     
@@ -81,10 +90,14 @@ class ElasticsearchDeepInspector:
             "has_password": False,
             "has_token": False,
             "has_credit_card": False,
+            "has_ransomware_note": False,
+            "ransomware_matches": set(),
             "sample_emails": set(),
             "sample_phones": set(),
             "risk_score": 0
         }
+
+        self._detect_ransomware_note(index_name, result)
         
         # Получаем маппинг
         mapping = self.get_index_mapping(index_name)
@@ -179,6 +192,16 @@ class ElasticsearchDeepInspector:
         
         if any(k in doc_str for k in ["token", "bearer", "authorization", "api_key"]):
             result["has_token"] = True
+
+        self._detect_ransomware_note(doc_str, result)
+
+    def _detect_ransomware_note(self, text: str, result: Dict):
+        """Детектирует возможные ransomware записки в имени индекса или документе"""
+        text_lower = text.lower()
+        for keyword in RANSOMWARE_NOTE_KEYWORDS:
+            if keyword in text_lower:
+                result["has_ransomware_note"] = True
+                result["ransomware_matches"].add(keyword)
     
     def _calculate_risk_score(self, result: Dict) -> int:
         """Подсчитывает risk score"""
@@ -197,6 +220,8 @@ class ElasticsearchDeepInspector:
         if result["has_token"]:
             score += 50
         if result["has_credit_card"]:
+            score += 50
+        if result["has_ransomware_note"]:
             score += 50
         
         # Количество документов (больше = хуже)
@@ -273,6 +298,9 @@ def format_deep_analysis_report(analysis: Dict) -> str:
                 flags.append("🎫 Tokens/API Keys")
             if idx["has_credit_card"]:
                 flags.append("💳 Credit Cards")
+            if idx["has_ransomware_note"]:
+                matches = ", ".join(sorted(idx["ransomware_matches"])[:5])
+                flags.append(f"🧨 Ransomware note ({matches})")
             
             if flags:
                 lines.append(f"  Flags: {', '.join(flags)}")
@@ -313,4 +341,5 @@ if __name__ == "__main__":
             idx["fields"] = list(idx["fields"])
             idx["sample_emails"] = list(idx["sample_emails"])
             idx["sample_phones"] = list(idx["sample_phones"])
+            idx["ransomware_matches"] = list(idx["ransomware_matches"])
         json.dump(analysis, f, indent=2, ensure_ascii=False)

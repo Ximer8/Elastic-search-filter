@@ -28,6 +28,9 @@ requests.packages.urllib3.disable_warnings()
 
 IP_RE = re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b")
 URL_RE = re.compile(r"https?://[^\s,\"'<>]+", re.IGNORECASE)
+IP_PORT_RE = re.compile(
+    r"\b((?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)):(\d{1,5})\b"
+)
 
 UA = "es-security-scanner/2.0"
 COMMON_PORTS = [9200, 9300, 9201, 9202, 5601, 8080, 443, 80]
@@ -47,6 +50,29 @@ class DetectionRule:
     description: str
 
 
+RANSOMWARE_NOTE_KEYWORDS = [
+    "ransom", "ransomware", "your files are encrypted", "all your files",
+    "all your data", "decrypt", "decryption", "decryptor", "restore your files",
+    "recover your files", "recover your data", "pay ransom", "tor browser",
+    ".onion", "read_me", "read-me", "how_to_decrypt", "how-to-decrypt",
+    "help_decrypt", "decrypt_instructions", "encrypted by"
+]
+
+TEST_ENV_KEYWORDS = [
+    "test", "testing", "dev", "development", "stage", "staging", "qa", "uat",
+    "sandbox", "demo", "local", "nonprod", "non-prod", "preprod", "pre-prod",
+    "trial", "sample", "mock", "fixture"
+]
+
+PROD_ENV_KEYWORDS = [
+    "prod", "production", "live", "customer", "customers", "client", "tenant",
+    "account", "billing", "payment", "order", "orders", "invoice", "user",
+    "users", "support", "ticket", "subscription", "crm"
+]
+
+EXPLICIT_PROD_ENV_KEYWORDS = {"prod", "production", "live"}
+
+
 DETECTION_RULES = [
     DetectionRule(
         name="credentials",
@@ -54,6 +80,13 @@ DETECTION_RULES = [
         keywords=["api_key", "apikey", "api-key", "secret", "token", "authorization", "bearer", "access_token"],
         severity=10,
         description="API keys, secrets, tokens"
+    ),
+    DetectionRule(
+        name="ransomware_note",
+        category="🔴 CRITICAL",
+        keywords=RANSOMWARE_NOTE_KEYWORDS,
+        severity=10,
+        description="Possible ransomware note or recovery/payment instructions"
     ),
     DetectionRule(
         name="passwords",
@@ -168,6 +201,9 @@ class ScanResult:
     detected_rules: List[str] = field(default_factory=list)
     severity_score: int = 0
     sample_data: Dict = field(default_factory=dict)
+    environment: str = "unknown"
+    environment_confidence: int = 0
+    environment_signals: List[str] = field(default_factory=list)
     error: str = ""
     response_time: float = 0.0
 
@@ -203,6 +239,8 @@ def extract_targets_from_csv(path: str, delimiter: str = ",") -> List[Tuple[str,
             else:
                 # обычный reader
                 text = " ".join(row)
+
+            text_without_urls = URL_RE.sub(" ", text)
             
             # Ищем URL
             for url in URL_RE.findall(text):
@@ -218,9 +256,25 @@ def extract_targets_from_csv(path: str, delimiter: str = ",") -> List[Tuple[str,
                             targets.append(key)
                 except:
                     pass
+
+            # Ищем IP:port без схемы
+            for ip, port_text in IP_PORT_RE.findall(text_without_urls):
+                try:
+                    port = int(port_text)
+                except ValueError:
+                    continue
+
+                if not 1 <= port <= 65535:
+                    continue
+
+                key = (ip, port)
+                if key not in seen:
+                    seen.add(key)
+                    targets.append(key)
             
             # Ищем IP адреса
-            for ip in IP_RE.findall(text):
+            text_without_ip_ports = IP_PORT_RE.sub(" ", text_without_urls)
+            for ip in IP_RE.findall(text_without_ip_ports):
                 key = (ip, None)
                 if key not in seen:
                     seen.add(key)
@@ -266,6 +320,68 @@ def analyze_content(text: str, json_data: Optional[Dict] = None) -> Tuple[List[s
     return detected, severity_score, sample_data
 
 
+def env_keyword_matches(text: str, keyword: str) -> bool:
+    """Ищет env-keyword как отдельный токен, чтобы prod/dev не матчились в product/device."""
+    if len(keyword) <= 4 or "-" in keyword:
+        pattern = r"(?<![a-z0-9])" + re.escape(keyword) + r"(?![a-z0-9])"
+        return re.search(pattern, text) is not None
+    return keyword in text
+
+
+def classify_environment(text: str, cluster_name: str = "", index_names: Optional[List[str]] = None) -> Tuple[str, int, List[str]]:
+    """
+    Классифицирует Elasticsearch как production/test/unknown по именам кластера,
+    индексов и собранному контенту. Сигналы из имени кластера и индексов имеют
+    больший вес, потому что они обычно отражают назначение инстанса лучше sample.
+    """
+    signals = []
+    prod_score = 0
+    test_score = 0
+    explicit_prod_signal = False
+    explicit_test_signal = False
+
+    sources = []
+    if cluster_name:
+        sources.append(("cluster", cluster_name, 3))
+    for index_name in index_names or []:
+        sources.append(("index", index_name, 2))
+    if text:
+        sources.append(("content", text[:200000], 1))
+
+    for source_name, value, weight in sources:
+        value_lower = value.lower()
+        for keyword in TEST_ENV_KEYWORDS:
+            if env_keyword_matches(value_lower, keyword):
+                test_score += weight
+                if source_name in {"cluster", "index"}:
+                    explicit_test_signal = True
+                if len(signals) < 12:
+                    signals.append(f"{source_name}:{keyword}")
+        for keyword in PROD_ENV_KEYWORDS:
+            if env_keyword_matches(value_lower, keyword):
+                prod_score += weight
+                if source_name in {"cluster", "index"} and keyword in EXPLICIT_PROD_ENV_KEYWORDS:
+                    explicit_prod_signal = True
+                if len(signals) < 12:
+                    signals.append(f"{source_name}:{keyword}")
+
+    if prod_score == 0 and test_score == 0:
+        return "unknown", 0, signals
+
+    total = prod_score + test_score
+    if explicit_test_signal and not explicit_prod_signal:
+        return "test", int(test_score / total * 100), signals
+    if explicit_prod_signal and not explicit_test_signal:
+        return "production", int(prod_score / total * 100), signals
+
+    if test_score > prod_score or (test_score == prod_score and explicit_test_signal and not explicit_prod_signal):
+        return "test", int(test_score / total * 100), signals
+    if prod_score > test_score or (prod_score == test_score and explicit_prod_signal and not explicit_test_signal):
+        return "production", int(prod_score / total * 100), signals
+
+    return "unknown", 50, signals
+
+
 def parse_cat_indices(text: str) -> Optional[int]:
     """Парсит _cat/indices?v и возвращает количество индексов"""
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
@@ -277,6 +393,16 @@ def parse_cat_indices(text: str) -> Optional[int]:
         return max(0, len(lines) - 1)
     
     return None
+
+
+def parse_cat_indices_json(data: List[Dict]) -> Tuple[int, List[str]]:
+    """Парсит _cat/indices?format=json и возвращает количество и имена индексов"""
+    index_names = []
+    for item in data:
+        index_name = item.get("index")
+        if index_name:
+            index_names.append(index_name)
+    return len(index_names), index_names
 
 
 def extract_cluster_info(data: Dict) -> Tuple[str, str]:
@@ -360,7 +486,7 @@ def scan_single_port(host: str, port: int, timeout: int, max_sample_size: int) -
             )
             
             # 2. Проверяем _cat/indices
-            indices_count = check_cat_indices(scheme, host, port, timeout, headers)
+            indices_count, index_names = get_indices_metadata(scheme, host, port, timeout, headers)
             result.indices_count = indices_count or 0
             
             # 3. Собираем sample данных из нескольких источников
@@ -385,10 +511,18 @@ def scan_single_port(host: str, port: int, timeout: int, max_sample_size: int) -
             
             # Анализируем весь собранный контент
             detected, severity, sample_data = analyze_content(all_content, all_json)
+            environment, env_confidence, env_signals = classify_environment(
+                all_content,
+                cluster_name=cluster_name,
+                index_names=index_names
+            )
             
             result.detected_rules = detected
             result.severity_score = severity
             result.sample_data = sample_data
+            result.environment = environment
+            result.environment_confidence = env_confidence
+            result.environment_signals = env_signals
             
             return result
             
@@ -398,6 +532,19 @@ def scan_single_port(host: str, port: int, timeout: int, max_sample_size: int) -
             continue
     
     return None
+
+
+def get_indices_metadata(scheme: str, host: str, port: int, timeout: int, headers: Dict) -> Tuple[Optional[int], List[str]]:
+    """Получает количество и имена индексов"""
+    try:
+        url = f"{scheme}://{host}:{port}/_cat/indices"
+        r = requests.get(url, timeout=timeout, headers=headers, params={"format": "json"}, verify=False)
+        if r.status_code == 200:
+            return parse_cat_indices_json(r.json())
+    except:
+        pass
+
+    return check_cat_indices(scheme, host, port, timeout, headers), []
 
 
 def check_cat_indices(scheme: str, host: str, port: int, timeout: int, headers: Dict) -> Optional[int]:
@@ -469,6 +616,8 @@ def format_result_line(result: ScanResult) -> str:
     
     if result.version:
         parts.append(f"ver={result.version}")
+
+    parts.append(f"env={result.environment}")
     
     if result.detected_rules:
         parts.append(f"detected={','.join(result.detected_rules)}")
@@ -483,6 +632,9 @@ def create_detailed_report(result: ScanResult) -> str:
     lines.append(f"HOST: {result.scheme}://{result.host}:{result.port}")
     lines.append(f"Cluster: {result.cluster_name or 'N/A'}")
     lines.append(f"Version: {result.version or 'N/A'}")
+    lines.append(f"Environment: {result.environment} ({result.environment_confidence}% confidence)")
+    if result.environment_signals:
+        lines.append(f"Environment Signals: {', '.join(result.environment_signals[:10])}")
     lines.append(f"Indices: {result.indices_count}")
     lines.append(f"Severity Score: {result.severity_score}")
     lines.append(f"Response Time: {result.response_time:.2f}s")
@@ -571,6 +723,10 @@ def main():
     
     # Записываем результаты
     critical_results = [r for r in all_results if r.severity_score >= 30]
+    ransomware_results = [r for r in all_results if "ransomware_note" in r.detected_rules]
+    production_results = [r for r in all_results if r.environment == "production"]
+    test_results = [r for r in all_results if r.environment == "test"]
+    unknown_env_results = [r for r in all_results if r.environment == "unknown"]
     
     # 1. Основной файл результатов
     with open(args.out_results, "w", encoding="utf-8") as f:
@@ -578,6 +734,8 @@ def main():
         f.write(f"# Total hosts scanned: {len(targets)}\n")
         f.write(f"# Accessible hosts: {len(all_results)}\n")
         f.write(f"# Critical findings: {len(critical_results)}\n")
+        f.write(f"# Ransomware note findings: {len(ransomware_results)}\n")
+        f.write(f"# Production/Test/Unknown: {len(production_results)}/{len(test_results)}/{len(unknown_env_results)}\n")
         f.write("#\n")
         f.write("# Format: URL | Indices | Score | Severity | Details\n")
         f.write("#" + "=" * 79 + "\n\n")
@@ -617,6 +775,9 @@ def main():
             "severity_score": result.severity_score,
             "detected_rules": result.detected_rules,
             "sample_data": result.sample_data,
+            "environment": result.environment,
+            "environment_confidence": result.environment_confidence,
+            "environment_signals": result.environment_signals,
             "response_time": result.response_time
         })
     
@@ -630,8 +791,16 @@ def main():
     print(f"Всего просканировано целей: {len(targets)}")
     print(f"Доступных Elasticsearch хостов: {len(all_results)}")
     print(f"🔴 Критичных находок (score >= 30): {len(critical_results)}")
+    print(f"🧨 Возможных ransomware записок: {len(ransomware_results)}")
     print(f"🟠 Средних находок (score 10-29): {len([r for r in all_results if 10 <= r.severity_score < 30])}")
     print(f"🟢 Низких находок (score < 10): {len([r for r in all_results if r.severity_score < 10])}")
+
+    print("\nРАЗДЕЛЕНИЕ ПО ОКРУЖЕНИЯМ:")
+    print(f"  production: {len(production_results)}")
+    print(f"  test-like: {len(test_results)}")
+    print(f"  unknown: {len(unknown_env_results)}")
+    print(f"  production critical: {len([r for r in production_results if r.severity_score >= 30])}")
+    print(f"  test-like critical: {len([r for r in test_results if r.severity_score >= 30])}")
     
     # Топ детекций
     detection_stats = defaultdict(int)

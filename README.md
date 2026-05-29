@@ -1,384 +1,681 @@
-# 🔍 Advanced Elasticsearch Security Scanner
+# Modular Research Scanner
 
-Профессиональный инструмент для массового сканирования Elasticsearch инстансов с детекцией критичных данных и уязвимостей.
+Инструмент для авторизованного security research: массовая проверка целей,
+отсев ложнопозитивных результатов, риск-скоринг и подготовка данных для
+ответственного уведомления владельца системы.
 
-## 🎯 Основные возможности
+Проект начинался как Elasticsearch scanner, но теперь имеет модульный
+интерфейс. Старые Elasticsearch entrypoint-ы сохранены для совместимости.
 
-### ✅ Что умеет сканер:
+## Возможности
 
-1. **Мультипортовое сканирование**
-   - Автоматическая проверка популярных портов (9200, 9300, 9201, 5601, 8080, 443, 80)
-   - Поддержка custom портов из CSV
-   - HTTP и HTTPS проверка
+- Модульный запуск проверок через `scanner.py`
+- Модули: `elasticsearch`, `laravel_debug`
+- Legacy Elasticsearch scanner с мультипортовой проверкой
+- Детекция чувствительных данных: credentials, passwords, PII, medical,
+  financial, backups, CI/CD, auth logs
+- Детекция возможных ransomware записок в Elasticsearch
+- Классификация окружения: `production`, `test`, `unknown`
+- JSON, TXT, CSV и Markdown отчеты
+- Analyzer для фильтрации по severity, detection и module
+- Deep Inspector для детального анализа конкретного Elasticsearch host
 
-2. **Детекция критичных данных** (основано на ваших фильтрах)
-   - 🔴 **CRITICAL**: API ключи, пароли, медицинские данные, финансовая информация
-   - 🟠 **HIGH**: Логи поддержки, внутренние заметки, production данные
-   - 🟡 **MEDIUM**: Корпоративные данные, бэкапы, CI/CD конфиги
-   - Scoring система (0-100)
+## Структура
 
-3. **Глубокий анализ содержимого**
-   - Анализ маппингов индексов
-   - Поиск PII (emails, телефоны, SSN)
-   - Детекция паролей, токенов, API ключей
-   - Поиск кредитных карт
-   - Анализ чувствительных полей
-
-4. **Множественные форматы вывода**
-   - Краткий список (сортировка по severity)
-   - Критичные находки отдельным файлом
-   - Детальный отчет по каждому хосту
-   - JSON для автоматизации
-
-## 📦 Установка
-
-```bash
-# Установка зависимостей
-pip install requests --break-system-packages
-
-# Скачивание скриптов (уже у вас есть)
-# es_advanced_scanner.py - основной сканер
-# es_deep_inspector.py - глубокий анализ
+```text
+.
+├── scanner.py                 # Новый модульный entrypoint
+├── modules/
+│   ├── base.py                # ScanTarget, ModuleResult, ScannerModule
+│   ├── registry.py            # Регистрация доступных модулей
+│   ├── elasticsearch.py       # Elasticsearch adapter module
+│   └── laravel_debug.py       # Laravel debug exposure module
+├── es_advanced_scanner.py     # Legacy Elasticsearch scanner
+├── es_results_analyzer.py     # Analyzer для JSON результатов
+├── es_deep_inspector.py       # Deep inspection одного Elasticsearch host
+├── scan.sh                    # Legacy удобный launcher
+└── automated_pipeline.sh      # Legacy automated ES workflow
 ```
 
-## 🚀 Быстрый старт
+## Установка
 
-### 1. Базовое сканирование
+Нужен Python 3 и `requests`.
+
+```bash
+pip install requests --break-system-packages
+```
+
+Если окружение не разрешает `--break-system-packages`, используйте virtualenv.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install requests
+```
+
+## Быстрый старт
+
+### Модульный запуск
+
+```bash
+python3 scanner.py -i targets.csv --modules elasticsearch,laravel_debug
+```
+
+Параметры:
+
+```bash
+python3 scanner.py \
+  -i targets.csv \
+  --modules elasticsearch,laravel_debug \
+  -w 50 \
+  -t 12 \
+  --sample-size 500 \
+  --out-results scan_results.txt \
+  --out-critical critical_findings.txt \
+  --out-json scan_results.json \
+  --out-module-dir module_summaries
+```
+
+Доступные модули:
+
+```bash
+python3 scanner.py --help
+```
+
+Сейчас зарегистрированы модули:
+
+```text
+elasticsearch
+laravel_debug
+```
+
+Laravel debug отдельно:
+
+```bash
+python3 scanner.py -i urls.csv --modules laravel_debug
+```
+
+### Legacy Elasticsearch запуск
+
+Старый scanner оставлен без изменения основного CLI:
 
 ```bash
 python3 es_advanced_scanner.py -i targets.csv
 ```
 
-Это запустит сканирование с настройками по умолчанию:
-- 30 параллельных потоков
-- Таймаут 10 секунд
-- Проверка всех популярных портов
-- Sample size 500 документов
-
-### 2. Продвинутое сканирование
+Расширенный запуск:
 
 ```bash
 python3 es_advanced_scanner.py \
-    -i targets.csv \
-    --delimiter "," \
-    -w 50 \
-    -t 15 \
-    --sample-size 1000 \
-    --out-results my_results.txt \
-    --out-critical critical_only.txt
+  -i targets.csv \
+  --delimiter "," \
+  -w 50 \
+  -t 15 \
+  --sample-size 1000 \
+  --out-results es_results.txt \
+  --out-critical es_critical.txt \
+  --out-detailed es_detailed_report.txt \
+  --out-json es_results.json
 ```
 
-Параметры:
-- `-i, --input` - CSV файл с целями (обязательно)
-- `--delimiter` - разделитель CSV (по умолчанию: `,`)
-- `-w, --workers` - количество потоков (по умолчанию: 30)
-- `-t, --timeout` - таймаут в секундах (по умолчанию: 10)
-- `--sample-size` - размер выборки для анализа (по умолчанию: 500)
-- `--out-results` - файл с результатами (по умолчанию: es_results.txt)
-- `--out-critical` - критичные находки (по умолчанию: es_critical.txt)
-- `--out-detailed` - детальный отчет (по умолчанию: es_detailed_report.txt)
-- `--out-json` - JSON с данными (по умолчанию: es_results.json)
+## Формат входного CSV
 
-## 📄 Формат входного CSV
+Scanner ищет URL, `IP:port` и IP во всех колонках CSV.
 
-Сканер поддерживает различные форматы CSV:
+Простой список IP:
 
-### Вариант 1: Просто IP адреса
 ```csv
 192.168.1.100
 10.0.0.50
 172.16.0.20
 ```
 
-### Вариант 2: IP с портами
+IP с портами:
+
 ```csv
 192.168.1.100:9200
 10.0.0.50:9300
 172.16.0.20:443
 ```
 
-### Вариант 3: Полные URL (рекомендуется)
+Полные URL:
+
 ```csv
 http://192.168.1.100:9200
 https://elastic.example.com:9200
 http://10.0.0.50:9300
 ```
 
-### Вариант 4: CSV с колонкой "link" (из Shodan/Censys)
+CSV из Shodan/Censys:
+
 ```csv
 ip,port,link
 192.168.1.100,9200,http://192.168.1.100:9200
 10.0.0.50,9300,http://10.0.0.50:9300
 ```
 
-### Вариант 5: Смешанный формат
-```csv
-192.168.1.100
-http://elastic.company.com:9200
-10.0.0.50:9300
-https://api.example.com/elasticsearch
+## Результаты
+
+Модульный JSON содержит общий формат для всех будущих модулей:
+
+```json
+{
+  "module": "elasticsearch",
+  "url": "http://127.0.0.1:9200",
+  "host": "127.0.0.1",
+  "port": 9200,
+  "scheme": "http",
+  "accessible": true,
+  "severity_score": 36,
+  "detected_rules": ["credentials", "ransomware_note", "pii", "production"],
+  "environment": "production",
+  "environment_confidence": 100,
+  "environment_signals": ["cluster:prod", "index:orders"],
+  "cluster_name": "prod-customer-es",
+  "version": "8.12.0",
+  "indices_count": 2
+}
 ```
 
-## 📊 Понимание результатов
+TXT output:
 
-### Severity Score (баллы критичности)
-
-- **80-100**: 🔴 КРИТИЧНО - немедленная эскалация
-  - Пароли, API ключи, медицинские данные
-  - Требует немедленных действий
-  
-- **50-79**: 🔴 ВЫСОКИЙ - срочное внимание
-  - PII данные, финансовая информация
-  - Требует быстрого реагирования
-  
-- **30-49**: 🟠 СРЕДНИЙ - требует проверки
-  - Логи поддержки, внутренние заметки
-  - Потенциальная утечка данных
-  
-- **10-29**: 🟡 НИЗКИЙ - наблюдение
-  - Production метаданные
-  - Минимальный риск
-  
-- **0-9**: 🟢 МИНИМАЛЬНЫЙ
-  - Тестовые данные
-  - Публичная информация
-
-### Типы детекций
-
-```
-🔴 CRITICAL детекции:
-├── credentials     - API ключи, токены, secrets
-├── passwords       - Пароли и хэши
-├── pii            - Персональные данные (email, телефоны)
-├── medical        - Медицинские данные (HIPAA)
-└── financial      - Финансовые данные (платежи, карты)
-
-🟠 HIGH детекции:
-├── support_chats   - Диалоги с клиентами
-├── internal_notes  - Внутренние заметки агентов
-├── production     - Production окружение
-└── cloud_metadata - AWS/GCP/Azure метаданные
-
-🟡 MEDIUM детекции:
-├── corporate      - Корпоративные данные
-├── backups        - Бэкапы и дампы
-├── cicd          - CI/CD конфиги
-└── auth_logs     - Логи аутентификации
+```text
+elasticsearch	http://127.0.0.1:9200	score=36	🟠	env=production	cluster=prod-customer-es	ver=8.12.0	indices=2	detected=credentials,ransomware_note,pii,production
 ```
 
-## 📈 Примеры вывода
+Per-module summaries:
 
-### Основной файл результатов (es_results.txt)
-```
-http://192.168.1.100:9200	indices=450	score=87	🔴	cluster=prod-customer-es	ver=7.10.0	detected=credentials,pii,support_chats
-https://10.0.0.50:9200	indices=23	score=52	🟠	cluster=test-cluster	ver=8.1.0	detected=pii,internal_notes
-http://172.16.0.20:9300	indices=5	score=15	🟡	cluster=dev-es	ver=7.17.0	detected=production
-```
-
-### Критичные находки (es_critical.txt)
-```
-🔴 http://192.168.1.100:9200 - Score: 87
-    └── credentials, pii, support_chats, financial
-    └── 450 indices, cluster: prod-customer-es
-    └── IMMEDIATE ACTION REQUIRED
-
-🔴 https://10.0.0.50:9200 - Score: 52
-    └── pii, internal_notes, passwords
-    └── 23 indices, cluster: test-cluster
-    └── HIGH PRIORITY
+```text
+module_summaries/
+├── elasticsearch_summary.txt
+└── laravel_debug_summary.txt
 ```
 
-### Детальный отчет (es_detailed_report.txt)
+Эти файлы короткие, но содержат все важное для быстрого ручного просмотра:
+
+- URL
+- score
+- environment
+- priority
+- false-positive confidence
+- detections
+- owner contacts
+- evidence
+- matched keywords
+- checked paths/status codes
+
+## Severity
+
+Severity считается суммой сработавших правил.
+
+- `>= 50`: critical
+- `30-49`: high
+- `10-29`: medium
+- `< 10`: low
+
+В legacy scanner критичными для отдельного файла считаются результаты
+`score >= 30`. Это сохранено для совместимости.
+
+## Elasticsearch module
+
+Модуль проверяет:
+
+- HTTP и HTTPS
+- стандартные Elasticsearch порты: `9200`, `9300`, `9201`, `9202`, `5601`,
+  `8080`, `443`, `80`
+- root endpoint на Elasticsearch tagline
+- `_cat/indices`
+- `_search` sample
+- `_cluster/health`
+- `_cluster/state`, если ответ меньше 1 MB
+
+Детекции:
+
+- `credentials`
+- `ransomware_note`
+- `passwords`
+- `pii`
+- `medical`
+- `financial`
+- `support_chats`
+- `internal_notes`
+- `production`
+- `cloud_metadata`
+- `corporate`
+- `backups`
+- `cicd`
+- `auth_logs`
+
+### Ransomware notes
+
+Ищутся признаки записок и инструкций вроде:
+
+- `your files are encrypted`
+- `how_to_decrypt`
+- `help_decrypt`
+- `tor browser`
+- `.onion`
+- `ransomware`
+- `encrypted by`
+
+Словарь специально не включает слишком общие слова вроде `readme`, `wallet`,
+`bitcoin`, чтобы не раздувать false positives.
+
+### Environment split
+
+Каждый результат получает:
+
+- `environment`: `production`, `test`, `unknown`
+- `environment_confidence`: 0-100
+- `environment_signals`: найденные сигналы
+
+Сигналы берутся из:
+
+- имени кластера
+- имен индексов
+- sample-контента
+
+Явные `qa`, `test`, `dev`, `staging` в cluster/index имеют приоритет над
+непрямыми business-сигналами из документов.
+
+## Laravel debug module
+
+Модуль `laravel_debug` ищет exposed Laravel debug/exception pages и снижает
+риск ложнопозитивных результатов. Он не эксплуатирует приложение: делает
+обычные GET запросы на `/` и безопасный случайный 404-path, чтобы проверить,
+не отдается ли debug stack trace.
+
+Запуск:
+
+```bash
+python3 scanner.py -i urls.csv --modules laravel_debug --out-json laravel_debug.json
 ```
-================================================================================
-HOST: http://192.168.1.100:9200
-Cluster: prod-customer-es
-Version: 7.10.0
-Indices: 450
-Severity Score: 87
-Response Time: 1.23s
 
-DETECTED ISSUES:
-  🔴 CRITICAL CREDENTIALS
-    Description: API keys, secrets, tokens
-    Severity: 10/10
-    Matched keywords: api_key, secret, authorization, bearer, token
+Надежная находка требует Laravel marker плюс debug marker или явную утечку
+env/secrets. Обычная 500/404 страница без таких признаков не считается
+finding.
 
-  🔴 CRITICAL PII
-    Description: Personal Identifiable Information
-    Severity: 9/10
-    Matched keywords: email, phone, first_name, last_name, address
-================================================================================
+Детекции:
+
+- `laravel_debug`: exposed Laravel debug/exception page
+- `server_error_debug`: debug page reachable on 5xx response
+- `stack_trace`: stack trace frames are exposed
+- `env_secrets`: в debug output видны env/secrets признаки
+
+Дополнительные поля:
+
+- `notification_priority`: `urgent`, `high`, `medium`, `low`
+- `false_positive_confidence`: уверенность, что это не ложнопозитив
+- `evidence`: короткие безопасные сигналы
+- `owner`: company, contacts, confidence, sources
+- `checked_paths`: какие URL проверялись
+- `status_codes`: HTTP статусы проверенных paths
+
+Owner discovery пассивный:
+
+- `/.well-known/security.txt`
+- `/security.txt`
+- homepage title/meta
+- emails на homepage/security.txt
+
+Контакты cloud provider фильтруются, приоритет у контактов самого домена.
+
+## Analyzer
+
+Показать статистику:
+
+```bash
+python3 es_results_analyzer.py -i scan_results.json --stats
 ```
 
-## 🔧 Глубокий анализ (Deep Inspector)
+Фильтр по severity:
 
-Для детального анализа конкретного хоста:
+```bash
+python3 es_results_analyzer.py -i scan_results.json --min-score 30 -o high_plus.json
+```
+
+Фильтр по detection:
+
+```bash
+python3 es_results_analyzer.py -i scan_results.json --detection ransomware_note -o ransomware_notes.json
+```
+
+Фильтр по module:
+
+```bash
+python3 es_results_analyzer.py -i scan_results.json --module elasticsearch -o elasticsearch_only.json
+```
+
+Экспорт URL:
+
+```bash
+python3 es_results_analyzer.py -i scan_results.json --export-urls urls.txt
+```
+
+CSV:
+
+```bash
+python3 es_results_analyzer.py -i scan_results.json --export-csv results.csv
+```
+
+Markdown report:
+
+```bash
+python3 es_results_analyzer.py -i scan_results.json --markdown-report report.md
+```
+
+Analyzer совместим со старыми JSON без поля `module`: такие результаты
+считаются `elasticsearch`.
+
+## Deep Inspector
+
+Для детального анализа одного Elasticsearch host:
 
 ```bash
 python3 es_deep_inspector.py http 192.168.1.100 9200
 ```
 
-Это создаст:
-- `deep_analysis_192.168.1.100_9200.txt` - текстовый отчет
-- `deep_analysis_192.168.1.100_9200.json` - JSON с данными
+Он создает:
 
-Deep Inspector анализирует:
-- Все индексы и их маппинги
-- Чувствительные поля по именам
-- Содержимое документов (emails, телефоны, карты)
-- Risk score для каждого индекса
-
-## 🎯 Практические сценарии
-
-### Сценарий 1: Быстрая проверка списка IP
-```bash
-# У вас есть список IP из Shodan
-python3 es_advanced_scanner.py -i shodan_results.csv -w 100 -t 5
+```text
+deep_analysis_192.168.1.100_9200.txt
+deep_analysis_192.168.1.100_9200.json
 ```
 
-### Сценарий 2: Глубокое сканирование с детальным анализом
-```bash
-# Первый проход - быстрое сканирование
-python3 es_advanced_scanner.py -i targets.csv -w 50
+Deep Inspector проверяет:
 
-# Второй проход - глубокий анализ критичных
-for host in $(cat es_critical.txt | grep "http" | awk '{print $1}'); do
-    python3 es_deep_inspector.py http $(echo $host | cut -d: -f2 | tr -d '/') 9200
-done
-```
+- список индексов
+- mapping
+- settings
+- sample документов
+- sensitive поля
+- emails, phones, credit cards
+- passwords/tokens
+- ransomware note признаки в имени индекса и документах
 
-### Сценарий 3: Непрерывный мониторинг
-```bash
-# Добавить в cron для регулярной проверки
-0 */6 * * * cd /path/to/scanner && python3 es_advanced_scanner.py -i targets.csv --out-results results_$(date +\%Y\%m\%d_\%H\%M).txt
-```
+## Модульный интерфейс
 
-## 🔐 Детекция по вашим фильтрам
+Новый модуль должен:
 
-Сканер реализует ВСЕ ваши фильтры из документа:
+1. Наследовать `ScannerModule`
+2. Принимать `ScanTarget`
+3. Возвращать один или несколько `ModuleResult`
+4. Быть зарегистрированным в `modules/registry.py`
 
-### ✅ Реализованные детекции:
+Единые правила:
 
-1. ✅ Unauthenticated access (нет auth)
-2. ✅ Production data / Prod-cluster
-3. ✅ Full read access (_cat/indices, _search)
-4. ✅ Support chats / customer communications
-5. ✅ PII / персональные данные
-6. ✅ Internal notes / internal comments
-7. ✅ Бренды, реальные клиенты
-8. ✅ Credentials / Secrets / Tokens
-9. ✅ Пароли / хэши / auth-данные
-10. ✅ Логи аутентификации
-11. ✅ Платежи / биллинг / финансы
-12. ✅ Персональные документы
-13. ✅ Health / medical
-14. ✅ CI/CD / DevOps
-15. ✅ Cloud metadata
-16. ✅ Backups / dumps
+- Имя модуля: lowercase snake_case, regex `^[a-z][a-z0-9_]*$`
+- `module.name` обязан совпадать с ключом в `AVAILABLE_MODULES`
+- `module.description` обязателен
+- Модуль не пишет файлы самостоятельно
+- Модуль не печатает в stdout во время scan
+- Модуль возвращает только `ModuleResult`
+- Все дополнительные поля кладутся в `ModuleResult.details`
+- Секреты в `sample_data`, `evidence`, `details` должны быть редактированы
+- Обычные ошибки сети не должны падать наружу, модуль просто не возвращает finding
+- Finding должен проходить false-positive контроль внутри модуля
+- Network activity должен быть bounded: timeout из CLI, ограниченный sample/fetch
+- Модуль должен быть пассивным, если явно не согласован active режим
 
-## 🛡️ Рекомендации по безопасности
+Registry проверяет базовые правила при запуске `scanner.py`.
 
-### ⚠️ ВНИМАНИЕ:
-- Используйте ТОЛЬКО на авторизованных целях
-- Не перегружайте целевые сервера (настройте `-w` и `-t`)
-- Храните результаты в безопасном месте
-- Немедленно сообщайте о критичных находках
-
-### Лучшие практики:
-1. Начните с малого количества потоков (-w 10)
-2. Увеличивайте таймаут для медленных сетей (-t 15-20)
-3. Используйте JSON вывод для интеграции с другими инструментами
-4. Регулярно обновляйте detection rules в коде
-
-## 📝 Расширение детекций
-
-Чтобы добавить свои правила детекции, отредактируйте `DETECTION_RULES` в `es_advanced_scanner.py`:
+Минимальный пример:
 
 ```python
-DETECTION_RULES.append(
-    DetectionRule(
-        name="my_custom_detection",
-        category="🔴 CRITICAL",
-        keywords=["keyword1", "keyword2", "keyword3"],
-        severity=9,
-        description="My custom detection"
-    )
+from typing import Iterable
+
+from modules.base import ModuleResult, ScannerModule, ScanTarget
+
+
+class ExampleModule(ScannerModule):
+    name = "example"
+    description = "Example module"
+
+    def scan(self, target: ScanTarget, timeout: int, sample_size: int) -> Iterable[ModuleResult]:
+        yield ModuleResult(
+            module=self.name,
+            url=target.url or target.raw,
+            host=target.host,
+            accessible=True,
+            severity_score=0,
+            detected_rules=[],
+        )
+```
+
+Регистрация:
+
+```python
+from modules.example import ExampleModule
+
+AVAILABLE_MODULES = {
+    ElasticsearchModule.name: ElasticsearchModule(),
+    ExampleModule.name: ExampleModule(),
+}
+```
+
+После этого:
+
+```bash
+python3 scanner.py -i targets.csv --modules elasticsearch,example
+```
+
+### Рекомендованный `ModuleResult`
+
+```python
+ModuleResult(
+    module="example",
+    url="https://example.com",
+    host="example.com",
+    accessible=True,
+    severity_score=42,
+    detected_rules=["example_exposure"],
+    sample_data={
+        "example_exposure": {
+            "category": "HIGH",
+            "description": "What was found",
+            "matched": ["safe evidence only"],
+            "severity": 8,
+        }
+    },
+    environment="production",
+    environment_confidence=80,
+    environment_signals=["host:prod"],
+    details={
+        "notification_priority": "high",
+        "false_positive_confidence": 90,
+        "evidence": ["short safe signal"],
+        "owner": {
+            "company": "Example",
+            "contacts": ["security@example.com"],
+            "confidence": 80,
+            "sources": ["/.well-known/security.txt"],
+        },
+    }
 )
 ```
 
-## 🐛 Troubleshooting
+`scanner.py` автоматически:
 
-### Проблема: "No targets found in CSV"
-**Решение**: Проверьте формат CSV, попробуйте изменить `--delimiter`
+- пишет общий TXT
+- пишет critical TXT
+- пишет общий JSON
+- пишет краткий файл по каждому модулю в `--out-module-dir`
+- показывает общую статистику по модулям
 
-### Проблема: "Connection timeout"
-**Решение**: Увеличьте `--timeout`, уменьшите `--workers`
+## План для S3 module
 
-### Проблема: "SSL verification failed"
-**Решение**: Скрипт автоматически игнорирует SSL ошибки (verify=False)
+Следующий модуль лучше добавлять как `modules/s3.py`, не внутрь
+`es_advanced_scanner.py`.
 
-### Проблема: Медленное сканирование
-**Решение**: Увеличьте `-w` (workers), уменьшите `--sample-size`
+Минимальный безопасный scope:
 
-## 📞 Поддержка
+- распознавать bucket targets из URL/host
+- проверять public listing через `?list-type=2`
+- парсить XML listing
+- искать подозрительные object keys:
+  - `.env`
+  - `credentials`
+  - `aws_access_key_id`
+  - `aws_secret_access_key`
+  - `api_key`
+  - `secret`
+  - `token`
+  - `password`
+  - `private_key`
+  - `kubeconfig`
+  - `backup`
+  - `dump`
+  - `.sql`
+  - `.bak`
+  - `.zip`
+  - `users`
+  - `customers`
+  - `orders`
+  - `payments`
+  - `kyc`
+  - `passport`
+  - `pii`
+- не скачивать большие архивы и дампы
+- для маленьких text/json/yaml/env файлов делать bounded fetch
+- редактировать секреты в отчетах
 
-При обнаружении багов или предложений по улучшению:
-1. Проверьте JSON вывод для деталей
-2. Запустите с одним хостом для тестирования
-3. Проверьте формат входного CSV
+S3 module должен возвращать `ModuleResult(module="s3", ...)`, чтобы analyzer
+автоматически показывал отдельную статистику по S3.
 
-## 📜 Changelog
+## План для owner discovery module
 
-### Version 2.0 (текущая)
-- ✅ Мультипортовое сканирование
-- ✅ Расширенная детекция по 16 категориям
-- ✅ Scoring система
-- ✅ Глубокий анализ индексов
-- ✅ JSON вывод
-- ✅ Детекция PII, credentials, medical data
-- ✅ Поддержка различных форматов CSV
+Owner discovery лучше делать отдельным enrichment module:
 
-### Version 1.0 (оригинальная)
-- Базовое сканирование портов 9200/9300
-- Простой вывод
+- `/.well-known/security.txt`
+- `/security.txt`
+- RDAP/WHOIS
+- DNS MX/TXT/SOA
+- TLS certificate subject/SAN
+- homepage contact/support/security/privacy/legal links
+- emails вроде `security@domain`, `support@domain`, `abuse@domain`
+- confidence score и список sources
 
-## 🎓 Дополнительные ресурсы
+Цель: найти контакт самой компании или ее security policy/support, а не
+поддержку cloud provider как основной контакт.
 
-### Полезные команды для работы с результатами:
+## Проверка перед ручным запуском
+
+Быстрая локальная проверка синтаксиса:
 
 ```bash
-# Топ 10 самых критичных
-cat es_results.txt | grep "🔴" | head -10
-
-# Все хосты с credentials
-grep "credentials" es_results.txt
-
-# Подсчет по severity
-cat es_results.txt | grep -o "score=[0-9]*" | cut -d= -f2 | sort -n | uniq -c
-
-# Экспорт в Excel-friendly CSV
-cat es_results.txt | grep -v "^#" | sed 's/\t/,/g' > results.csv
-
-# Фильтр только production
-grep "production" es_results.txt | sort -t= -k3 -nr
+python3 -m py_compile \
+  scanner.py \
+  modules/base.py \
+  modules/registry.py \
+  modules/elasticsearch.py \
+  es_advanced_scanner.py \
+  es_results_analyzer.py \
+  es_deep_inspector.py
 ```
 
-### Интеграция с jq для работы с JSON:
+Проверить CLI:
 
 ```bash
-# Хосты с score > 50
-cat es_results.json | jq '.[] | select(.severity_score > 50)'
-
-# Топ детекций
-cat es_results.json | jq -r '.[].detected_rules[]' | sort | uniq -c | sort -nr
-
-# Хосты с конкретной детекцией
-cat es_results.json | jq '.[] | select(.detected_rules[] == "credentials")'
+python3 scanner.py --help
+python3 es_results_analyzer.py --help
+python3 es_advanced_scanner.py --help
 ```
 
----
+Проверить registry:
 
-**Happy Hunting! 🎯**
+```bash
+python3 -c "from modules.registry import validate_registry; validate_registry(); print('registry-ok')"
+```
 
-*Помните: Используйте этичные методы. С большой силой приходит большая ответственность.*
+### Полный debug Laravel module
+
+Позитивный тест должен показать один finding с:
+
+- `module=laravel_debug`
+- `severity_score >= 70`
+- `notification_priority=urgent`
+- `false_positive_confidence` близко к 100
+- `owner.contacts`
+- `env_secrets`
+
+Негативный тест должен вернуть `no findings` для обычной Laravel-like страницы
+без debug markers.
+
+После запуска проверить все output-слои:
+
+```bash
+python3 scanner.py \
+  -i laravel_targets.csv \
+  --modules laravel_debug \
+  --out-results laravel_results.txt \
+  --out-critical laravel_critical.txt \
+  --out-json laravel_results.json \
+  --out-module-dir module_summaries
+
+python3 es_results_analyzer.py \
+  -i laravel_results.json \
+  --stats \
+  --module laravel_debug \
+  --export-csv laravel_results.csv \
+  --markdown-report laravel_report.md
+```
+
+Ручно посмотреть:
+
+```bash
+cat laravel_results.txt
+cat laravel_critical.txt
+cat module_summaries/laravel_debug_summary.txt
+python3 -m json.tool laravel_results.json
+```
+
+## Рекомендуемый workflow
+
+1. Запустить модульный scanner:
+
+```bash
+python3 scanner.py -i targets.csv --modules elasticsearch,laravel_debug --out-json scan_results.json
+```
+
+2. Посмотреть статистику:
+
+```bash
+python3 es_results_analyzer.py -i scan_results.json --stats
+```
+
+3. Вынести подозрительные ransomware findings:
+
+```bash
+python3 es_results_analyzer.py \
+  -i scan_results.json \
+  --detection ransomware_note \
+  -o ransomware_notes.json
+```
+
+4. Отдельно посмотреть production findings:
+
+```bash
+python3 es_results_analyzer.py \
+  -i scan_results.json \
+  --min-score 30 \
+  --export-csv high_findings.csv
+```
+
+5. Для конкретных Elasticsearch hosts запустить deep inspector вручную.
+
+6. Для Laravel debug findings смотреть priority и owner contacts:
+
+```bash
+python3 es_results_analyzer.py \
+  -i scan_results.json \
+  --module laravel_debug \
+  --export-csv laravel_debug.csv
+```
+
+## Примечания по безопасности
+
+- Используйте инструмент только для авторизованного research.
+- Не сохраняйте полные секреты в публичные отчеты.
+- Не скачивайте большие дампы без необходимости.
+- Для уведомления владельцев оставляйте только минимальное доказательство
+  воздействия: URL, тип находки, несколько безопасно отредактированных сигналов.
