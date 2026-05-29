@@ -9,11 +9,13 @@ from typing import Dict
 from modules.base import ScannerModule
 from modules.elasticsearch import ElasticsearchModule
 from modules.laravel_debug import LaravelDebugModule
+from modules.s3_bucket_impact import S3BucketImpactModule
 
 
 AVAILABLE_MODULES: Dict[str, ScannerModule] = {
     ElasticsearchModule.name: ElasticsearchModule(),
     LaravelDebugModule.name: LaravelDebugModule(),
+    S3BucketImpactModule.name: S3BucketImpactModule(),
 }
 
 

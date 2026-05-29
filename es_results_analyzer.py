@@ -125,7 +125,8 @@ def export_detailed_csv(results: List[Dict], output: str):
         writer.writerow([
             "Module", "URL", "Host", "Port", "Scheme", "Cluster", "Version", 
             "Environment", "Env Confidence", "Indices", "Severity",
-            "Priority", "FP Confidence", "Owner Contacts", "Ransomware Note",
+            "Priority", "FP Confidence", "Owner Contacts", "Bucket", "Region",
+            "Listed Objects", "Public Listing", "Ransomware Note",
             "Detections", "Response Time"
         ])
         
@@ -145,6 +146,10 @@ def export_detailed_csv(results: List[Dict], output: str):
                 r.get("notification_priority", ""),
                 r.get("false_positive_confidence", ""),
                 ",".join((r.get("owner") or {}).get("contacts", [])),
+                r.get("bucket", ""),
+                r.get("region", ""),
+                r.get("listed_objects", ""),
+                r.get("public_listing", ""),
                 "yes" if "ransomware_note" in r.get("detected_rules", []) else "no",
                 ",".join(r["detected_rules"]),
                 f"{r.get('response_time', 0):.2f}"
@@ -262,6 +267,22 @@ def generate_markdown_report(results: List[Dict], stats: Dict, output: str):
             )
     else:
         lines.append("*No Laravel debug findings*")
+    lines.append("")
+
+    lines.append("## S3 Bucket Impact Findings\n")
+    s3_results = [r for r in results if r.get("module") == "s3_bucket_impact"]
+    if s3_results:
+        lines.append("| Bucket | Region | Environment | Score | Priority | Listed Objects | Public Listing | Detections |")
+        lines.append("|--------|--------|-------------|-------|----------|----------------|----------------|------------|")
+        for r in sorted(s3_results, key=lambda x: -x["severity_score"])[:30]:
+            lines.append(
+                f"| {r.get('bucket', r.get('host', ''))} | {r.get('region', '')} | "
+                f"{r.get('environment', 'unknown')} | {r['severity_score']} | "
+                f"{r.get('notification_priority', '')} | {r.get('listed_objects', '')} | "
+                f"{r.get('public_listing', '')} | {', '.join(r.get('detected_rules', [])[:6])} |"
+            )
+    else:
+        lines.append("*No S3 bucket impact findings*")
     lines.append("")
     
     lines.append("## 🔍 Top Detections\n")

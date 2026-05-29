@@ -9,8 +9,10 @@ available for compatibility, while new checks should be added as modules.
 """
 
 import argparse
+import csv
 import json
 import os
+import re
 import sys
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -21,13 +23,96 @@ from modules.base import ScanTarget
 from modules.registry import AVAILABLE_MODULES, get_modules
 
 
+URL_RE = re.compile(r"https?://[^\s,\"'<>]+", re.IGNORECASE)
+TOKEN_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:/-]{1,253}$")
+
+
 def load_targets(path: str, delimiter: str = ",") -> List[ScanTarget]:
-    """Loads targets using the legacy parser and normalizes them for modules."""
+    """Loads targets and normalizes them for modules."""
     targets = []
+    seen = set()
     for host, port in es_advanced_scanner.extract_targets_from_csv(path, delimiter=delimiter):
         raw = f"{host}:{port}" if port else host
-        targets.append(ScanTarget(raw=raw, host=host, port=port))
+        key = target_dedupe_key(ScanTarget(raw=raw, host=host, port=port))
+        if key not in seen:
+            seen.add(key)
+            targets.append(ScanTarget(raw=raw, host=host, port=port))
+
+    for raw in extract_generic_targets(path, delimiter=delimiter):
+        target = normalize_generic_target(raw)
+        key = target_dedupe_key(target)
+        if key not in seen:
+            seen.add(key)
+            targets.append(target)
     return targets
+
+
+def target_dedupe_key(target: ScanTarget):
+    """Deduplicates URL and host:port forms of the same target."""
+    host = (target.host or "").lower().strip()
+    port = target.port
+
+    if host:
+        return ("network", host, port)
+    return ("raw", target.raw.lower().strip())
+
+
+def extract_generic_targets(path: str, delimiter: str = ",") -> List[str]:
+    """Extracts URL/domain/bucket-like values for non-IP modules such as S3."""
+    values = []
+    seen = set()
+    with open(path, "r", encoding="utf-8", errors="ignore", newline="") as f:
+        sample = f.read(4096)
+        f.seek(0)
+        has_delimiter = delimiter in sample
+
+        rows = csv.reader(f, delimiter=delimiter) if has_delimiter else ([line.strip()] for line in f)
+        for row in rows:
+            for cell in row:
+                for value in split_candidate_values(str(cell), allow_plain=not has_delimiter):
+                    if value and value not in seen:
+                        seen.add(value)
+                        values.append(value)
+    return values
+
+
+def split_candidate_values(text: str, allow_plain: bool = False) -> List[str]:
+    values = []
+    for url in URL_RE.findall(text):
+        values.append(url.strip())
+        text = text.replace(url, " ")
+
+    for token in re.split(r"[\s,;]+", text):
+        token = token.strip().strip("\"'<>")
+        if not token or token.lower() in {"host", "ip", "port", "protocol", "title", "domain", "country", "city", "link", "org"}:
+            continue
+        if token.startswith("s3://") or "amazonaws.com" in token:
+            values.append(token)
+            continue
+        if allow_plain and TOKEN_RE.match(token) and any(ch.isalpha() for ch in token):
+            values.append(token)
+    return values
+
+
+def normalize_generic_target(raw: str) -> ScanTarget:
+    if raw.startswith(("http://", "https://")):
+        from urllib.parse import urlparse
+
+        parsed = urlparse(raw)
+        return ScanTarget(
+            raw=raw,
+            host=parsed.hostname or parsed.netloc or raw,
+            port=parsed.port,
+            scheme=parsed.scheme,
+            url=raw,
+        )
+
+    if raw.startswith("s3://"):
+        bucket = raw[5:].split("/", 1)[0]
+        return ScanTarget(raw=raw, host=bucket, port=None, scheme="s3", url=raw)
+
+    host = raw.split("/", 1)[0]
+    return ScanTarget(raw=raw, host=host, port=None)
 
 
 def result_line(result: dict) -> str:
@@ -96,6 +181,14 @@ def compact_module_result(result: dict) -> str:
         lines.append(f"Version: {result['version']}")
     if result.get("indices_count") is not None:
         lines.append(f"Indices: {result.get('indices_count', 0)}")
+    if result.get("bucket"):
+        lines.append(f"Bucket: {result['bucket']}")
+    if result.get("region"):
+        lines.append(f"Region: {result['region']}")
+    if result.get("listed_objects") is not None:
+        lines.append(f"Listed Objects: {result.get('listed_objects', 0)}")
+    if result.get("public_read_checked") is not None:
+        lines.append(f"Public Read Objects Checked: {result.get('public_read_checked', 0)}")
 
     evidence = result.get("evidence") or []
     if evidence:
@@ -123,6 +216,10 @@ def compact_module_result(result: dict) -> str:
 
     if result.get("error"):
         lines.append(f"Error: {result['error']}")
+
+    if result.get("security_report"):
+        lines.append("")
+        lines.append(result["security_report"])
 
     return "\n".join(lines)
 
