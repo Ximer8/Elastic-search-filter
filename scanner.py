@@ -10,6 +10,7 @@ available for compatibility, while new checks should be added as modules.
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import re
@@ -20,11 +21,115 @@ from typing import List
 
 import es_advanced_scanner
 from modules.base import ScanTarget
+from modules.reporter import write_critical_reports
 from modules.registry import AVAILABLE_MODULES, get_modules
 
 
 URL_RE = re.compile(r"https?://[^\s,\"'<>]+", re.IGNORECASE)
 TOKEN_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:/-]{1,253}$")
+CACHE_VERSION = 3
+
+
+def format_available_modules() -> str:
+    """Builds a readable module list for CLI help and --list-modules."""
+    lines = ["Available modules:"]
+    for name in sorted(AVAILABLE_MODULES):
+        module = AVAILABLE_MODULES[name]
+        lines.append(f"  {name:<20} {module.description}")
+    lines.append("")
+    lines.append("Run all modules with: --modules all")
+    lines.append("Run selected modules with: --modules name1,name2")
+    return "\n".join(lines)
+
+
+def print_available_modules():
+    print(format_available_modules())
+
+
+def input_fingerprint(path: str) -> dict:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+
+    stat = os.stat(path)
+    return {
+        "path": os.path.abspath(path),
+        "sha256": digest.hexdigest(),
+        "size": stat.st_size,
+    }
+
+
+def manifest_path(out_json: str) -> str:
+    return f"{out_json}.manifest.json"
+
+
+def cache_metadata(args, module_names: List[str]) -> dict:
+    return {
+        "cache_version": CACHE_VERSION,
+        "input": input_fingerprint(args.input),
+        "modules": sorted(module_names),
+        "delimiter": args.delimiter,
+        "sample_size": args.sample_size,
+    }
+
+
+def load_cached_results(args, module_names: List[str]):
+    path = manifest_path(args.out_json)
+    if not os.path.exists(path) or not os.path.exists(args.out_json):
+        return None
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        current = cache_metadata(args, module_names)
+        if manifest != current:
+            return None
+        with open(args.out_json, "r", encoding="utf-8") as f:
+            results = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    if not results:
+        return None
+    return results
+
+
+def write_cache_manifest(args, module_names: List[str]):
+    with open(manifest_path(args.out_json), "w", encoding="utf-8") as f:
+        json.dump(cache_metadata(args, module_names), f, indent=2, ensure_ascii=False)
+
+
+def write_outputs(all_results: List[dict], targets_count: int, modules, args):
+    all_results.sort(key=lambda r: (-r["severity_score"], r.get("module", ""), r.get("url", "")))
+    critical_results = [r for r in all_results if r["severity_score"] >= 30]
+
+    with open(args.out_results, "w", encoding="utf-8") as f:
+        f.write("# Modular Research Scanner Results\n")
+        f.write(f"# Targets: {targets_count}\n")
+        f.write(f"# Modules: {', '.join(module.name for module in modules)}\n")
+        f.write(f"# Findings: {len(all_results)}\n")
+        f.write(f"# Critical findings: {len(critical_results)}\n")
+        f.write("#" + "=" * 79 + "\n\n")
+        for result in all_results:
+            f.write(result_line(result) + "\n")
+
+    with open(args.out_critical, "w", encoding="utf-8") as f:
+        f.write("# Critical Findings\n")
+        f.write(f"# Total critical: {len(critical_results)}\n")
+        f.write("#" + "=" * 79 + "\n\n")
+        for result in critical_results:
+            f.write(result_line(result) + "\n")
+
+    with open(args.out_json, "w", encoding="utf-8") as f:
+        json.dump(all_results, f, indent=2, ensure_ascii=False)
+
+    write_module_summaries(all_results, modules, args.out_module_dir)
+    return write_critical_reports(all_results, args.out_report_dir, verbose=True)
+
+
+def run_module_scan(module, target: ScanTarget, timeout: int, sample_size: int) -> List[dict]:
+    return [result.to_dict() for result in module.scan(target, timeout, sample_size)]
 
 
 def load_targets(path: str, delimiter: str = ",") -> List[ScanTarget]:
@@ -304,9 +409,19 @@ def main():
     ap = argparse.ArgumentParser(
         description="Modular research scanner",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=f"Available modules: {', '.join(sorted(AVAILABLE_MODULES))}"
+        epilog=(
+            f"{format_available_modules()}\n\n"
+            "Example:\n"
+            "  python3 scanner.py --list-modules\n"
+            "  python3 scanner.py -i targets.txt --modules elasticsearch,laravel_debug"
+        )
     )
-    ap.add_argument("-i", "--input", required=True, help="CSV file with targets")
+    ap.add_argument("-i", "--input", help="CSV file with targets")
+    ap.add_argument(
+        "--list-modules",
+        action="store_true",
+        help="Show available scanner modules and exit"
+    )
     ap.add_argument(
         "--modules",
         default="elasticsearch",
@@ -324,8 +439,25 @@ def main():
         default="module_summaries",
         help="Directory for compact per-module summary files"
     )
+    ap.add_argument(
+        "--out-report-dir",
+        default="critical_reports",
+        help="Directory for evidence-backed report packages grouped by severity"
+    )
+    ap.add_argument(
+        "--force-scan",
+        action="store_true",
+        help="Ignore cached scan_results.json metadata and scan targets again"
+    )
 
     args = ap.parse_args()
+
+    if args.list_modules:
+        print_available_modules()
+        return
+
+    if not args.input:
+        ap.error("the following argument is required for scanning: -i/--input")
 
     module_names = sorted(AVAILABLE_MODULES) if args.modules == "all" else [
         name.strip() for name in args.modules.split(",") if name.strip()
@@ -336,6 +468,22 @@ def main():
     except ValueError as exc:
         print(f"[!] {exc}", file=sys.stderr)
         sys.exit(2)
+
+    if not args.force_scan:
+        cached_results = load_cached_results(args, module_names)
+        if cached_results is not None:
+            print("[*] Cached results match this input and module set.")
+            print("[*] Skipping network scan and regenerating summaries/reports from JSON.")
+            targets_count = len(load_targets(args.input, delimiter=args.delimiter))
+            report_dirs = write_outputs(cached_results, targets_count, modules, args)
+            print_statistics(cached_results, targets_count)
+            print("\nOutput files:")
+            print(f"  Results: {args.out_results}")
+            print(f"  Critical: {args.out_critical}")
+            print(f"  JSON: {args.out_json}")
+            print(f"  Module summaries: {args.out_module_dir}")
+            print(f"  Evidence reports: {args.out_report_dir} ({len(report_dirs)} generated)")
+            return
 
     print("[*] Loading targets...")
     targets = load_targets(args.input, delimiter=args.delimiter)
@@ -354,11 +502,7 @@ def main():
         future_context = {}
         for target in targets:
             for module in modules:
-                future = executor.submit(
-                    lambda m, t: [r.to_dict() for r in m.scan(t, args.timeout, args.sample_size)],
-                    module,
-                    target
-                )
+                future = executor.submit(run_module_scan, module, target, args.timeout, args.sample_size)
                 tasks.append(future)
                 future_context[future] = (module.name, target.raw)
 
@@ -378,30 +522,9 @@ def main():
             else:
                 print(f"[-] {completed}/{len(tasks)} {module_name}:{target_raw} no findings")
 
-    all_results.sort(key=lambda r: (-r["severity_score"], r.get("module", ""), r.get("url", "")))
-    critical_results = [r for r in all_results if r["severity_score"] >= 30]
-
-    with open(args.out_results, "w", encoding="utf-8") as f:
-        f.write("# Modular Research Scanner Results\n")
-        f.write(f"# Targets: {len(targets)}\n")
-        f.write(f"# Modules: {', '.join(module.name for module in modules)}\n")
-        f.write(f"# Findings: {len(all_results)}\n")
-        f.write(f"# Critical findings: {len(critical_results)}\n")
-        f.write("#" + "=" * 79 + "\n\n")
-        for result in all_results:
-            f.write(result_line(result) + "\n")
-
-    with open(args.out_critical, "w", encoding="utf-8") as f:
-        f.write("# Critical Findings\n")
-        f.write(f"# Total critical: {len(critical_results)}\n")
-        f.write("#" + "=" * 79 + "\n\n")
-        for result in critical_results:
-            f.write(result_line(result) + "\n")
-
-    with open(args.out_json, "w", encoding="utf-8") as f:
-        json.dump(all_results, f, indent=2, ensure_ascii=False)
-
-    write_module_summaries(all_results, modules, args.out_module_dir)
+    report_dirs = write_outputs(all_results, len(targets), modules, args)
+    if all_results:
+        write_cache_manifest(args, module_names)
 
     print_statistics(all_results, len(targets))
     print("\nOutput files:")
@@ -409,6 +532,7 @@ def main():
     print(f"  Critical: {args.out_critical}")
     print(f"  JSON: {args.out_json}")
     print(f"  Module summaries: {args.out_module_dir}")
+    print(f"  Evidence reports: {args.out_report_dir} ({len(report_dirs)} generated)")
 
 
 if __name__ == "__main__":

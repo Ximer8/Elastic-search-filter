@@ -10,12 +10,14 @@ from modules.base import ScannerModule
 from modules.elasticsearch import ElasticsearchModule
 from modules.laravel_debug import LaravelDebugModule
 from modules.s3_bucket_impact import S3BucketImpactModule
+from modules.trufflehog_s3 import TruffleHogS3Module
 
 
 AVAILABLE_MODULES: Dict[str, ScannerModule] = {
     ElasticsearchModule.name: ElasticsearchModule(),
     LaravelDebugModule.name: LaravelDebugModule(),
     S3BucketImpactModule.name: S3BucketImpactModule(),
+    TruffleHogS3Module.name: TruffleHogS3Module(),
 }
 
 

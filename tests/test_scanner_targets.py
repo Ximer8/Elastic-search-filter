@@ -1,8 +1,11 @@
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 
-from scanner import load_targets
+from scanner import format_available_modules, load_cached_results, load_targets, write_cache_manifest
 
 
 class ScannerTargetLoadingTests(unittest.TestCase):
@@ -29,6 +32,54 @@ class ScannerTargetLoadingTests(unittest.TestCase):
             ("10.0.0.2", 9200),
             ("10.0.0.3", 9200),
         ])
+
+    def test_available_modules_output_is_readable(self):
+        output = format_available_modules()
+
+        self.assertIn("Available modules:", output)
+        self.assertIn("elasticsearch", output)
+        self.assertIn("laravel_debug", output)
+        self.assertIn("s3_bucket_impact", output)
+        self.assertIn("trufflehog_s3", output)
+        self.assertIn("--modules all", output)
+
+    def test_list_modules_does_not_require_input_file(self):
+        result = subprocess.run(
+            [sys.executable, "scanner.py", "--list-modules"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Available modules:", result.stdout)
+        self.assertIn("elasticsearch", result.stdout)
+        self.assertEqual(result.stderr, "")
+
+    def test_scan_cache_matches_same_input_and_modules(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = os.path.join(tmpdir, "targets.txt")
+            out_json = os.path.join(tmpdir, "scan_results.json")
+            with open(input_path, "w", encoding="utf-8") as f:
+                f.write("example-bucket\n")
+            with open(out_json, "w", encoding="utf-8") as f:
+                f.write('[{"module": "s3_bucket_impact", "severity_score": 30}]')
+
+            args = SimpleNamespace(
+                input=input_path,
+                out_json=out_json,
+                delimiter=",",
+                sample_size=500,
+            )
+            write_cache_manifest(args, ["s3_bucket_impact"])
+
+            cached = load_cached_results(args, ["s3_bucket_impact"])
+            self.assertEqual(len(cached), 1)
+
+            with open(input_path, "a", encoding="utf-8") as f:
+                f.write("changed\n")
+
+            self.assertIsNone(load_cached_results(args, ["s3_bucket_impact"]))
 
 
 if __name__ == "__main__":

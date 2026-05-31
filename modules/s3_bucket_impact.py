@@ -27,8 +27,13 @@ SENSITIVE_KEY_PATTERNS = {
     "archives": re.compile(r"\.(zip|tar|tgz|gz|7z|rar)$", re.I),
     "logs": re.compile(r"(^|[/._-])(log|logs|access|error|debug)([/._-]|$)|\.log$", re.I),
     "pii_named": re.compile(r"(customer|user|users|client|clients|email|emails|phone|passport|ssn|invoice|billing|payment)", re.I),
-    "source_code": re.compile(r"(^|/)(\.git|src|source|config|settings)(/|$)|\.(py|js|ts|php|rb|go|java|env)$", re.I),
+    "source_code": re.compile(r"(^|/)(\.git|src|source|config|settings)(/|$)|\.(py|php|rb|go|java|env|yaml|yml|ini|conf|properties)$", re.I),
 }
+STATIC_ASSET_RE = re.compile(
+    r"\.(?:js|mjs|css|map|png|jpe?g|gif|webp|svg|ico|bmp|tiff?|avif|woff2?|ttf|eot|otf|mp4|webm|mov|mp3|wav|pdf)$",
+    re.I,
+)
+SENSITIVE_RULES = {"secrets", "private_keys", "database_backups", "logs", "pii_named", "source_code"}
 
 
 class S3BucketImpactModule(ScannerModule):
@@ -36,12 +41,25 @@ class S3BucketImpactModule(ScannerModule):
     description = "Assesses public AWS S3 bucket exposure and business impact"
 
     def scan(self, target: ScanTarget, timeout: int, sample_size: int) -> Iterable[ModuleResult]:
-        bucket = self._bucket_from_target(target)
+        bucket, endpoints = self._bucket_and_endpoints_from_target(target)
         if not bucket:
             return
 
+        for endpoint in endpoints:
+            result = self._scan_endpoint(bucket, endpoint, timeout, sample_size)
+            if result:
+                yield result
+                return
+
+    def _scan_endpoint(
+        self,
+        bucket: str,
+        endpoint: Dict[str, str],
+        timeout: int,
+        sample_size: int,
+    ) -> Optional[ModuleResult]:
         started = time.time()
-        base_url = f"https://{bucket}.s3.amazonaws.com"
+        base_url = endpoint["base_url"]
         headers = {
             "User-Agent": "modular-research-scanner/1.0 s3-bucket-impact",
             "Accept": "application/xml,text/xml,text/plain,*/*",
@@ -52,19 +70,22 @@ class S3BucketImpactModule(ScannerModule):
             return
 
         region = head["headers"].get("x-amz-bucket-region", "")
-        bucket_exists = head["status_code"] in {200, 301, 302, 307, 400, 403}
+        bucket_exists = head["status_code"] in {200, 301, 302, 307, 400, 403} or self._looks_like_s3_response(head)
         if not bucket_exists:
-            return
+            return None
 
-        listing_url = f"{base_url}/?list-type=2&max-keys={max(1, min(sample_size, 1000))}"
+        separator = "&" if "?" in endpoint["list_url"] else "?"
+        listing_url = f"{endpoint['list_url']}{separator}list-type=2&max-keys={max(1, min(sample_size, 1000))}"
         listing = self._request("GET", listing_url, headers, timeout)
+        if listing and not region:
+            region = listing["headers"].get("x-amz-bucket-region", "")
         object_keys = self._parse_listed_keys(listing["text"]) if listing else []
         public_listing = bool(listing and listing["status_code"] == 200 and object_keys)
 
         checked_objects = []
         public_read_count = 0
         for key in object_keys[: min(len(object_keys), 25)]:
-            object_url = f"{base_url}/{self._quote_key(key)}"
+            object_url = f"{endpoint['object_base_url'].rstrip('/')}/{self._quote_key(key)}"
             obj_head = self._request("HEAD", object_url, headers, timeout)
             status_code = obj_head["status_code"] if obj_head else 0
             content_length = obj_head["headers"].get("Content-Length", "") if obj_head else ""
@@ -79,11 +100,19 @@ class S3BucketImpactModule(ScannerModule):
             })
 
         detected_rules, sample_data, evidence = self._analyze(bucket, head, listing, object_keys, checked_objects)
+        if not self._has_actionable_exposure(detected_rules):
+            return None
         if not detected_rules:
-            return
+            return None
 
         environment, env_confidence, env_signals = self._classify_environment(bucket, object_keys)
-        severity_score = self._severity_score(detected_rules, environment, len(object_keys), public_read_count)
+        severity_score = self._severity_score(
+            detected_rules,
+            environment,
+            len(object_keys),
+            public_read_count,
+            object_keys,
+        )
         priority = self._notification_priority(severity_score, detected_rules)
         report = self._security_report(
             bucket=bucket,
@@ -97,7 +126,7 @@ class S3BucketImpactModule(ScannerModule):
             environment=environment,
         )
 
-        yield ModuleResult(
+        return ModuleResult(
             module=self.name,
             url=base_url,
             host=bucket,
@@ -114,6 +143,7 @@ class S3BucketImpactModule(ScannerModule):
             details={
                 "bucket": bucket,
                 "region": region,
+                "endpoint_source": endpoint.get("source", "unknown"),
                 "notification_priority": priority,
                 "public_listing": public_listing,
                 "listed_objects": len(object_keys),
@@ -128,18 +158,153 @@ class S3BucketImpactModule(ScannerModule):
             },
         )
 
+    def _bucket_and_endpoints_from_target(self, target: ScanTarget) -> Tuple[Optional[str], List[Dict[str, str]]]:
+        for item in self._target_values(target):
+            bucket, endpoints = self._bucket_and_endpoints_from_text(item)
+            if bucket:
+                return bucket, endpoints
+        return None, []
+
+    def _target_values(self, target: ScanTarget) -> List[str]:
+        values = []
+        for item in [target.raw, target.url, target.host]:
+            if item and item not in values:
+                values.append(item)
+        return values
+
+    def _bucket_and_endpoints_from_text(self, value: str) -> Tuple[Optional[str], List[Dict[str, str]]]:
+        value = value.strip().strip("/").strip()
+        if not value:
+            return None, []
+
+        if value.startswith("s3://"):
+            bucket = value[5:].split("/", 1)[0]
+            if not self._valid_bucket(bucket):
+                return None, []
+            return bucket, self._dedupe_endpoints([self._canonical_endpoint(bucket)])
+
+        if self._looks_like_s3_http_value(value) and not value.startswith(("http://", "https://")):
+            return self._bucket_and_endpoints_from_text(f"https://{value}")
+
+        if value.startswith(("http://", "https://")):
+            parsed = urlparse(value)
+            bucket, original_endpoint, region = self._endpoint_from_parsed_url(parsed)
+            if not bucket:
+                return None, []
+
+            endpoints = [original_endpoint]
+            if region and "amazonaws.com" in (parsed.hostname or ""):
+                endpoints.append(self._regional_endpoint(bucket, region))
+            if "amazonaws.com" in (parsed.hostname or ""):
+                endpoints.append(self._canonical_endpoint(bucket))
+            return bucket, self._dedupe_endpoints(endpoints)
+
+        if "." in value:
+            return None, []
+        if self._valid_bucket(value):
+            return value, self._dedupe_endpoints([self._canonical_endpoint(value)])
+        return None, []
+
+    def _looks_like_s3_http_value(self, value: str) -> bool:
+        lowered = value.lower()
+        return (
+            "amazonaws.com" in lowered
+            or "digitaloceanspaces.com" in lowered
+            or "storage.googleapis.com" in lowered
+        )
+
+    def _endpoint_from_parsed_url(self, parsed) -> Tuple[Optional[str], Optional[Dict[str, str]], str]:
+        host = parsed.hostname or ""
+        path_parts = [part for part in parsed.path.split("/") if part]
+        origin = f"{parsed.scheme}://{host}"
+        region = ""
+
+        match = re.match(r"^(.+)\.s3[.-]([a-z0-9-]+)\.amazonaws\.com$", host)
+        if match:
+            bucket = match.group(1)
+            region = match.group(2)
+            if self._valid_bucket(bucket):
+                return bucket, self._virtual_hosted_endpoint(origin, "original"), region
+
+        match = re.match(r"^(.+)\.s3\.amazonaws\.com$", host)
+        if match:
+            bucket = match.group(1)
+            if self._valid_bucket(bucket):
+                return bucket, self._virtual_hosted_endpoint(origin, "original"), region
+
+        match = re.match(r"^(.+)\.s3-website[.-]([a-z0-9-]+)\.amazonaws\.com$", host)
+        if match:
+            bucket = match.group(1)
+            region = match.group(2)
+            if self._valid_bucket(bucket):
+                return bucket, self._virtual_hosted_endpoint(origin, "original"), region
+
+        if re.match(r"^s3[.-]([a-z0-9-]+)\.amazonaws\.com$", host) or host == "s3.amazonaws.com":
+            region_match = re.match(r"^s3[.-]([a-z0-9-]+)\.amazonaws\.com$", host)
+            region = region_match.group(1) if region_match else ""
+            if path_parts and self._valid_bucket(path_parts[0]):
+                bucket = path_parts[0]
+                base_url = f"{origin}/{bucket}"
+                return bucket, self._path_style_endpoint(base_url, "original"), region
+
+        if self._looks_like_s3_http_value(host):
+            bucket = host.split(".", 1)[0]
+            if self._valid_bucket(bucket):
+                return bucket, self._virtual_hosted_endpoint(origin, "original"), region
+
+        return None, None, ""
+
+    def _virtual_hosted_endpoint(self, base_url: str, source: str) -> Dict[str, str]:
+        return {
+            "base_url": base_url.rstrip("/"),
+            "list_url": f"{base_url.rstrip('/')}/",
+            "object_base_url": base_url.rstrip("/"),
+            "source": source,
+        }
+
+    def _path_style_endpoint(self, base_url: str, source: str) -> Dict[str, str]:
+        return {
+            "base_url": base_url.rstrip("/"),
+            "list_url": base_url.rstrip("/"),
+            "object_base_url": base_url.rstrip("/"),
+            "source": source,
+        }
+
+    def _canonical_endpoint(self, bucket: str) -> Dict[str, str]:
+        return self._virtual_hosted_endpoint(f"https://{bucket}.s3.amazonaws.com", "canonical")
+
+    def _regional_endpoint(self, bucket: str, region: str) -> Dict[str, str]:
+        return self._virtual_hosted_endpoint(f"https://{bucket}.s3.{region}.amazonaws.com", "regional")
+
+    def _dedupe_endpoints(self, endpoints: List[Optional[Dict[str, str]]]) -> List[Dict[str, str]]:
+        deduped = []
+        seen = set()
+        for endpoint in endpoints:
+            if not endpoint:
+                continue
+            key = (endpoint["base_url"], endpoint["list_url"], endpoint["object_base_url"])
+            if key not in seen:
+                seen.add(key)
+                deduped.append(endpoint)
+        return deduped
+
     def _request(self, method: str, url: str, headers: Dict, timeout: int) -> Optional[Dict]:
-        try:
-            response = requests.request(
-                method,
-                url,
-                headers=headers,
-                timeout=timeout,
-                verify=False,
-                allow_redirects=False,
-            )
-        except RequestException:
-            return None
+        response = None
+        for attempt in range(3):
+            try:
+                response = requests.request(
+                    method,
+                    url,
+                    headers=headers,
+                    timeout=timeout,
+                    verify=False,
+                    allow_redirects=False,
+                )
+                break
+            except RequestException:
+                if attempt == 2:
+                    return None
+                time.sleep(0.25 * (attempt + 1))
 
         text = ""
         if method != "HEAD":
@@ -153,13 +318,18 @@ class S3BucketImpactModule(ScannerModule):
             "text": text,
         }
 
+    def _looks_like_s3_response(self, response: Dict) -> bool:
+        headers = {str(key).lower(): str(value).lower() for key, value in response.get("headers", {}).items()}
+        server = headers.get("server", "")
+        return (
+            "amazons3" in server
+            or any(key.startswith("x-amz-") for key in headers)
+            or "<code>nosuchkey</code>" in (response.get("text") or "").lower()
+        )
+
     def _bucket_from_target(self, target: ScanTarget) -> Optional[str]:
-        candidates = [target.raw, target.url, target.host]
-        for item in candidates:
-            bucket = self._bucket_from_text(item or "")
-            if bucket:
-                return bucket
-        return None
+        bucket, _ = self._bucket_and_endpoints_from_target(target)
+        return bucket
 
     def _bucket_from_text(self, value: str) -> Optional[str]:
         value = value.strip().strip("/").strip()
@@ -294,6 +464,21 @@ class S3BucketImpactModule(ScannerModule):
 
         return list(dict.fromkeys(detected)), sample_data, evidence
 
+    def _has_actionable_exposure(self, detected_rules: List[str]) -> bool:
+        actionable = {
+            "bucket_public_head",
+            "public_bucket_listing",
+            "public_object_read",
+            "secrets",
+            "private_keys",
+            "database_backups",
+            "archives",
+            "logs",
+            "pii_named",
+            "source_code",
+        }
+        return bool(set(detected_rules) & actionable)
+
     def _aws_error_code(self, text: str) -> str:
         match = AWS_ERROR_RE.search(text or "")
         return match.group(1) if match else ""
@@ -314,11 +499,18 @@ class S3BucketImpactModule(ScannerModule):
             return "production", 80, ["bucket_or_key:production_marker"]
         return "unknown", 0, []
 
-    def _severity_score(self, detected_rules: List[str], environment: str, listed_count: int, public_read_count: int) -> int:
+    def _severity_score(
+        self,
+        detected_rules: List[str],
+        environment: str,
+        listed_count: int,
+        public_read_count: int,
+        object_keys: Optional[List[str]] = None,
+    ) -> int:
         weights = {
             "bucket_public_head": 5,
-            "public_bucket_listing": 30,
-            "public_object_read": 25,
+            "public_bucket_listing": 20,
+            "public_object_read": 12,
             "secrets": 25,
             "private_keys": 30,
             "database_backups": 25,
@@ -336,7 +528,16 @@ class S3BucketImpactModule(ScannerModule):
             score += 10
         if public_read_count >= 10:
             score += 10
+        if self._mostly_static_assets(object_keys or []) and not (set(detected_rules) & SENSITIVE_RULES):
+            score = min(score, 35 if environment != "production" else 45)
         return min(score, 100)
+
+    def _mostly_static_assets(self, object_keys: List[str]) -> bool:
+        if not object_keys:
+            return False
+        sampled = object_keys[: min(len(object_keys), 50)]
+        static_count = sum(1 for key in sampled if STATIC_ASSET_RE.search(key))
+        return static_count / len(sampled) >= 0.8
 
     def _notification_priority(self, severity_score: int, detected_rules: List[str]) -> str:
         if severity_score >= 70 or "private_keys" in detected_rules or "secrets" in detected_rules:
