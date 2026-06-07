@@ -127,14 +127,17 @@ class TruffleHogS3ModuleTests(unittest.TestCase):
         output = "".join(call.args[0] for call in stderr.write.call_args_list)
         self.assertIn("code 2: bad bucket permission", output)
 
-    def test_non_s3_target_is_not_supported(self):
+    def test_supports_target_accepts_all_inputs_for_bucket_search(self):
         module = TruffleHogS3Module()
 
-        self.assertFalse(module.supports_target(
+        self.assertTrue(module.supports_target(
             ScanTarget(raw="https://example.com/app.js", host="example.com", scheme="https")
         ))
         self.assertTrue(module.supports_target(
             ScanTarget(raw="https://company-prod.s3.amazonaws.com", host="company-prod.s3.amazonaws.com", scheme="https")
+        ))
+        self.assertTrue(module.supports_target(
+            ScanTarget(raw="http://89.169.157.235", host="89.169.157.235", scheme="http")
         ))
 
 

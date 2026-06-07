@@ -41,8 +41,7 @@ class S3BucketImpactModule(ScannerModule):
     description = "Assesses public AWS S3 bucket exposure and business impact"
 
     def supports_target(self, target: ScanTarget) -> bool:
-        bucket, _ = self._bucket_and_endpoints_from_target(target)
-        return bool(bucket)
+        return True
 
     def scan(self, target: ScanTarget, timeout: int, sample_size: int) -> Iterable[ModuleResult]:
         bucket, endpoints = self._bucket_and_endpoints_from_target(target)
@@ -192,6 +191,9 @@ class S3BucketImpactModule(ScannerModule):
             parsed = urlparse(value)
             bucket, original_endpoint, region = self._endpoint_from_parsed_url(parsed)
             if not bucket:
+                host = parsed.hostname or ""
+                if self._valid_bucket(host):
+                    return host, self._dedupe_endpoints([self._canonical_endpoint(host)])
                 return None, []
 
             endpoints = [original_endpoint]
@@ -201,8 +203,6 @@ class S3BucketImpactModule(ScannerModule):
                 endpoints.append(self._canonical_endpoint(bucket))
             return bucket, self._dedupe_endpoints(endpoints)
 
-        if "." in value:
-            return None, []
         if self._valid_bucket(value):
             return value, self._dedupe_endpoints([self._canonical_endpoint(value)])
         return None, []
@@ -362,6 +362,8 @@ class S3BucketImpactModule(ScannerModule):
             if re.match(r"^s3[.-][a-z0-9-]+\.amazonaws\.com$", host) or host == "s3.amazonaws.com":
                 if path_parts and self._valid_bucket(path_parts[0]):
                     return path_parts[0]
+            if self._valid_bucket(host):
+                return host
             return None
 
         if self._valid_bucket(value):

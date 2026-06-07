@@ -11,6 +11,7 @@ available for compatibility, while new checks should be added as modules.
 import argparse
 import csv
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -173,6 +174,17 @@ def target_dedupe_key(target: ScanTarget):
     if host:
         return ("network", host, port)
     return ("raw", target.raw.lower().strip())
+
+
+def is_ip_target(target: ScanTarget) -> bool:
+    host = (target.host or "").strip("[]")
+    if not host:
+        return False
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
 
 
 def extract_generic_targets(path: str, delimiter: str = ",") -> List[str]:
@@ -490,6 +502,11 @@ def main():
         "--trufflehog-path",
         help="Full path to trufflehog binary for the trufflehog_s3 module"
     )
+    ap.add_argument(
+        "--skip-ip-targets",
+        action="store_true",
+        help="Skip targets whose normalized host is an IP address"
+    )
 
     args = ap.parse_args()
 
@@ -531,6 +548,10 @@ def main():
 
     print("[*] Loading targets...")
     targets = load_targets(args.input, delimiter=args.delimiter)
+    if args.skip_ip_targets:
+        before_count = len(targets)
+        targets = [target for target in targets if not is_ip_target(target)]
+        print(f"[*] Skipped IP targets: {before_count - len(targets)}")
     if not targets:
         print("[!] No targets found", file=sys.stderr)
         sys.exit(1)

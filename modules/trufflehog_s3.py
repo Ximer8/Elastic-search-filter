@@ -29,7 +29,7 @@ class TruffleHogS3Module(ScannerModule):
     _prompted_for_binary = False
 
     def supports_target(self, target: ScanTarget) -> bool:
-        return bool(S3BucketImpactModule()._bucket_from_target(target))
+        return True
 
     def scan(self, target: ScanTarget, timeout: int, sample_size: int) -> Iterable[ModuleResult]:
         bucket = S3BucketImpactModule()._bucket_from_target(target)

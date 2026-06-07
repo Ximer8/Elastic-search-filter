@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
-from scanner import format_available_modules, load_cached_results, load_targets, write_cache_manifest
+from scanner import format_available_modules, is_ip_target, load_cached_results, load_targets, write_cache_manifest
 
 
 class ScannerTargetLoadingTests(unittest.TestCase):
@@ -58,6 +58,20 @@ class ScannerTargetLoadingTests(unittest.TestCase):
             "https://s3.amazonaws.com/path-style-bucket",
             "s3://another-demo-bucket",
         ])
+
+    def test_ip_target_detection_for_optional_filter(self):
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tmp:
+            tmp.write("url\nhttp://89.169.157.235\nhttps://cdn.timepad.ru\n")
+            tmp_path = tmp.name
+
+        try:
+            targets = load_targets(tmp_path)
+        finally:
+            os.unlink(tmp_path)
+
+        by_raw = {target.raw: target for target in targets}
+        self.assertTrue(is_ip_target(by_raw["89.169.157.235"]))
+        self.assertFalse(is_ip_target(by_raw["cdn.timepad.ru"]))
 
     def test_available_modules_output_is_readable(self):
         output = format_available_modules()

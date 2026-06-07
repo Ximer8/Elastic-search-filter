@@ -18,6 +18,8 @@ class S3BucketImpactTests(unittest.TestCase):
         module = S3BucketImpactModule()
         samples = {
             "company-prod-backups": "company-prod-backups",
+            "cdn.timepad.ru": "cdn.timepad.ru",
+            "https://cdn.timepad.ru/assets/app.js": "cdn.timepad.ru",
             "s3://company-prod-backups": "company-prod-backups",
             "company-prod-backups.s3.amazonaws.com": "company-prod-backups",
             "https://company-prod-backups.s3.amazonaws.com": "company-prod-backups",
@@ -30,12 +32,11 @@ class S3BucketImpactTests(unittest.TestCase):
                 target = ScanTarget(raw=raw, host=raw)
                 self.assertEqual(module._bucket_from_target(target), expected)
 
-    def test_regular_domain_is_not_treated_as_bucket(self):
+    def test_ip_and_invalid_domains_are_not_treated_as_bucket(self):
         module = S3BucketImpactModule()
         samples = [
-            ScanTarget(raw="gamerask.com", host="gamerask.com"),
-            ScanTarget(raw="assets3.example.com", host="assets3.example.com"),
-            ScanTarget(raw="https://assets3.example.com/logo.png", host="assets3.example.com", scheme="https"),
+            ScanTarget(raw="http://89.169.157.235", host="89.169.157.235", scheme="http"),
+            ScanTarget(raw="https://bad_bucket_name.example.com", host="bad_bucket_name.example.com", scheme="https"),
         ]
 
         for target in samples:
@@ -46,10 +47,10 @@ class S3BucketImpactTests(unittest.TestCase):
                 self.assertEqual(results, [])
                 request.assert_not_called()
 
-    def test_supports_target_only_for_bucket_like_values(self):
+    def test_supports_target_accepts_all_inputs_for_bucket_search(self):
         module = S3BucketImpactModule()
 
-        self.assertFalse(module.supports_target(
+        self.assertTrue(module.supports_target(
             ScanTarget(raw="https://example.com/app.js", host="example.com", scheme="https")
         ))
         self.assertTrue(module.supports_target(
@@ -57,6 +58,9 @@ class S3BucketImpactTests(unittest.TestCase):
         ))
         self.assertTrue(module.supports_target(
             ScanTarget(raw="s3://company-prod", host="company-prod", scheme="s3")
+        ))
+        self.assertTrue(module.supports_target(
+            ScanTarget(raw="http://89.169.157.235", host="89.169.157.235", scheme="http")
         ))
 
     def test_regional_endpoint_is_preserved_before_canonical_fallback(self):
