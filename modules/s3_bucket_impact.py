@@ -40,6 +40,10 @@ class S3BucketImpactModule(ScannerModule):
     name = "s3_bucket_impact"
     description = "Assesses public AWS S3 bucket exposure and business impact"
 
+    def supports_target(self, target: ScanTarget) -> bool:
+        bucket, _ = self._bucket_and_endpoints_from_target(target)
+        return bool(bucket)
+
     def scan(self, target: ScanTarget, timeout: int, sample_size: int) -> Iterable[ModuleResult]:
         bucket, endpoints = self._bucket_and_endpoints_from_target(target)
         if not bucket:
@@ -100,8 +104,6 @@ class S3BucketImpactModule(ScannerModule):
             })
 
         detected_rules, sample_data, evidence = self._analyze(bucket, head, listing, object_keys, checked_objects)
-        if not self._has_actionable_exposure(detected_rules):
-            return None
         if not detected_rules:
             return None
 
@@ -463,21 +465,6 @@ class S3BucketImpactModule(ScannerModule):
             }
 
         return list(dict.fromkeys(detected)), sample_data, evidence
-
-    def _has_actionable_exposure(self, detected_rules: List[str]) -> bool:
-        actionable = {
-            "bucket_public_head",
-            "public_bucket_listing",
-            "public_object_read",
-            "secrets",
-            "private_keys",
-            "database_backups",
-            "archives",
-            "logs",
-            "pii_named",
-            "source_code",
-        }
-        return bool(set(detected_rules) & actionable)
 
     def _aws_error_code(self, text: str) -> str:
         match = AWS_ERROR_RE.search(text or "")

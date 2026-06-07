@@ -46,6 +46,19 @@ class S3BucketImpactTests(unittest.TestCase):
                 self.assertEqual(results, [])
                 request.assert_not_called()
 
+    def test_supports_target_only_for_bucket_like_values(self):
+        module = S3BucketImpactModule()
+
+        self.assertFalse(module.supports_target(
+            ScanTarget(raw="https://example.com/app.js", host="example.com", scheme="https")
+        ))
+        self.assertTrue(module.supports_target(
+            ScanTarget(raw="https://company-prod.s3.amazonaws.com", host="company-prod.s3.amazonaws.com", scheme="https")
+        ))
+        self.assertTrue(module.supports_target(
+            ScanTarget(raw="s3://company-prod", host="company-prod", scheme="s3")
+        ))
+
     def test_regional_endpoint_is_preserved_before_canonical_fallback(self):
         module = S3BucketImpactModule()
         target = ScanTarget(
@@ -218,7 +231,7 @@ class S3BucketImpactTests(unittest.TestCase):
         self.assertLess(result["severity_score"], 50)
         self.assertNotIn("source_code", result["detected_rules"])
 
-    def test_business_context_name_only_is_not_a_finding(self):
+    def test_business_context_name_only_is_returned_for_review(self):
         module = S3BucketImpactModule()
         target = ScanTarget(raw="company-prod-assets", host="company-prod-assets")
 
@@ -232,7 +245,8 @@ class S3BucketImpactTests(unittest.TestCase):
         with patch("modules.s3_bucket_impact.requests.request", side_effect=fake_request):
             results = list(module.scan(target, timeout=1, sample_size=100))
 
-        self.assertEqual(results, [])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].detected_rules, ["business_context_in_name"])
 
 
 if __name__ == "__main__":

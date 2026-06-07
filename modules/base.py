@@ -68,5 +68,8 @@ class ScannerModule:
     name = "base"
     description = ""
 
+    def supports_target(self, target: ScanTarget) -> bool:
+        return True
+
     def scan(self, target: ScanTarget, timeout: int, sample_size: int) -> Iterable[ModuleResult]:
         raise NotImplementedError

@@ -21,11 +21,15 @@ from modules.s3_bucket_impact import S3BucketImpactModule
 class TruffleHogS3Module(ScannerModule):
     name = "trufflehog_s3"
     description = "Runs TruffleHog secret detection against supplied AWS S3 buckets"
+    env_path_name = "TRUFFLEHOG_PATH"
     _warning_lock = threading.Lock()
     _warnings = set()
     _binary_lock = threading.Lock()
     _cached_binary: Optional[str] = None
     _prompted_for_binary = False
+
+    def supports_target(self, target: ScanTarget) -> bool:
+        return bool(S3BucketImpactModule()._bucket_from_target(target))
 
     def scan(self, target: ScanTarget, timeout: int, sample_size: int) -> Iterable[ModuleResult]:
         bucket = S3BucketImpactModule()._bucket_from_target(target)
@@ -55,7 +59,7 @@ class TruffleHogS3Module(ScannerModule):
         findings = self._parse_json_lines(completed.stdout, bucket, sample_size)
         if not findings:
             if completed.returncode != 0:
-                self._warn_once("nonzero_exit", "trufflehog_s3 scan exited with an error; no findings were recorded")
+                self._warn_command_failure(completed)
             return
 
         verified_count = sum(1 for item in findings if item["verified"])
@@ -153,13 +157,25 @@ class TruffleHogS3Module(ScannerModule):
         return re.sub(r"(?i)(password|passwd|secret|token|api[_-]?key)=([^/&\s]+)", r"\1=<redacted>", key)
 
     def _resolve_binary(self) -> Optional[str]:
+        env_binary = self._executable_from_path(os.environ.get(self.env_path_name, ""))
+        if env_binary:
+            self._cached_binary = env_binary
+            return env_binary
+
         binary = shutil.which("trufflehog")
         if binary:
+            self._cached_binary = binary
             return binary
 
         with self._binary_lock:
             if self._cached_binary:
                 return self._cached_binary
+
+            discovered = self._discover_common_binary()
+            if discovered:
+                self._cached_binary = discovered
+                return discovered
+
             if self._prompted_for_binary:
                 return None
             self._prompted_for_binary = True
@@ -182,20 +198,61 @@ class TruffleHogS3Module(ScannerModule):
                 self._warn_once("missing_binary_skipped", "trufflehog binary path was not provided; trufflehog_s3 scan skipped")
                 return None
 
-            candidate = os.path.abspath(os.path.expanduser(user_path))
-            if not os.path.isfile(candidate) or not os.access(candidate, os.X_OK):
+            candidate = self._executable_from_path(user_path)
+            if not candidate:
                 self._warn_once(
                     "missing_binary_invalid_path",
-                    f"provided trufflehog path is not an executable file: {candidate}; trufflehog_s3 scan skipped",
+                    f"provided trufflehog path is not an executable file: {user_path}; trufflehog_s3 scan skipped",
                 )
                 return None
 
             self._cached_binary = candidate
             return candidate
 
+    def _executable_from_path(self, path: str) -> Optional[str]:
+        if not path:
+            return None
+        candidate = os.path.abspath(os.path.expandvars(os.path.expanduser(path)))
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+        return None
+
+    def _discover_common_binary(self) -> Optional[str]:
+        candidates = []
+        for gopath in os.environ.get("GOPATH", "").split(os.pathsep):
+            if gopath:
+                candidates.append(os.path.join(gopath, "bin", "trufflehog"))
+
+        candidates.append(os.path.join(os.path.expanduser("~"), "go", "bin", "trufflehog"))
+
+        go_binary = shutil.which("go")
+        if go_binary:
+            try:
+                completed = subprocess.run(
+                    [go_binary, "env", "GOPATH"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                )
+                if completed.returncode == 0:
+                    gopath = completed.stdout.strip()
+                    if gopath:
+                        candidates.append(os.path.join(gopath, "bin", "trufflehog"))
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+
+        for candidate in candidates:
+            binary = self._executable_from_path(candidate)
+            if binary:
+                self._warn_once("autodiscovered_binary", f"using trufflehog binary found at {binary}")
+                return binary
+        return None
+
     def _print_missing_binary_help(self):
         print(
             "[!] trufflehog binary was not found in PATH.\n"
+            f"    You can also pass --trufflehog-path or set {self.env_path_name} to the executable path.\n"
             "    If TruffleHog is installed through Go or another installer, provide the full path to the executable.\n"
             "    Helpful commands:\n"
             "      command -v trufflehog\n"
@@ -204,6 +261,16 @@ class TruffleHogS3Module(ScannerModule):
             "      find \"$HOME\" -type f -name trufflehog -perm -111 2>/dev/null | head\n",
             file=sys.stderr,
             flush=True,
+        )
+
+    def _warn_command_failure(self, completed):
+        stderr = (completed.stderr or "").strip()
+        detail = ""
+        if stderr:
+            detail = f": {stderr.splitlines()[0][:240]}"
+        self._warn_once(
+            f"nonzero_exit_{completed.returncode}_{hashlib.sha256(stderr.encode('utf-8', errors='ignore')).hexdigest()[:8]}",
+            f"trufflehog_s3 scan exited with code {completed.returncode}{detail}; no findings were recorded",
         )
 
     def _warn_once(self, key: str, message: str):

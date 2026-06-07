@@ -33,6 +33,32 @@ class ScannerTargetLoadingTests(unittest.TestCase):
             ("10.0.0.3", 9200),
         ])
 
+    def test_single_column_url_header_is_not_loaded_as_bucket_target(self):
+        content = "\n".join(
+            [
+                "url",
+                "https://example.com/app.js",
+                "https://demo-bucket.s3.amazonaws.com",
+                "https://s3.amazonaws.com/path-style-bucket",
+                "s3://another-demo-bucket",
+            ]
+        )
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        try:
+            targets = load_targets(tmp_path)
+        finally:
+            os.unlink(tmp_path)
+
+        self.assertEqual([target.raw for target in targets], [
+            "example.com",
+            "https://demo-bucket.s3.amazonaws.com",
+            "https://s3.amazonaws.com/path-style-bucket",
+            "s3://another-demo-bucket",
+        ])
+
     def test_available_modules_output_is_readable(self):
         output = format_available_modules()
 

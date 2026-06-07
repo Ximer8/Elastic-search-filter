@@ -27,7 +27,7 @@ from modules.registry import AVAILABLE_MODULES, get_modules
 
 URL_RE = re.compile(r"https?://[^\s,\"'<>]+", re.IGNORECASE)
 TOKEN_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:/-]{1,253}$")
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 
 
 def format_available_modules() -> str:
@@ -138,6 +138,8 @@ def load_targets(path: str, delimiter: str = ",") -> List[ScanTarget]:
     seen = set()
     for host, port in es_advanced_scanner.extract_targets_from_csv(path, delimiter=delimiter):
         raw = f"{host}:{port}" if port else host
+        if is_cloud_storage_value(raw):
+            continue
         key = target_dedupe_key(ScanTarget(raw=raw, host=host, port=port))
         if key not in seen:
             seen.add(key)
@@ -150,6 +152,17 @@ def load_targets(path: str, delimiter: str = ",") -> List[ScanTarget]:
             seen.add(key)
             targets.append(target)
     return targets
+
+
+def is_cloud_storage_value(value: str) -> bool:
+    lowered = (value or "").lower()
+    return (
+        lowered.startswith(("s3://", "r2://"))
+        or "amazonaws.com" in lowered
+        or "r2.cloudflarestorage.com" in lowered
+        or "digitaloceanspaces.com" in lowered
+        or "storage.googleapis.com" in lowered
+    )
 
 
 def target_dedupe_key(target: ScanTarget):
@@ -189,9 +202,28 @@ def split_candidate_values(text: str, allow_plain: bool = False) -> List[str]:
 
     for token in re.split(r"[\s,;]+", text):
         token = token.strip().strip("\"'<>")
-        if not token or token.lower() in {"host", "ip", "port", "protocol", "title", "domain", "country", "city", "link", "org"}:
+        if not token or token.lower() in {
+            "host",
+            "ip",
+            "port",
+            "protocol",
+            "title",
+            "domain",
+            "country",
+            "city",
+            "link",
+            "url",
+            "uri",
+            "org",
+            "bucket",
+            "buckets",
+            "target",
+            "targets",
+            "endpoint",
+            "endpoints",
+        }:
             continue
-        if token.startswith("s3://") or "amazonaws.com" in token:
+        if token.startswith(("s3://", "r2://")) or "amazonaws.com" in token or "r2.cloudflarestorage.com" in token:
             values.append(token)
             continue
         if allow_plain and TOKEN_RE.match(token) and any(ch.isalpha() for ch in token):
@@ -215,6 +247,11 @@ def normalize_generic_target(raw: str) -> ScanTarget:
     if raw.startswith("s3://"):
         bucket = raw[5:].split("/", 1)[0]
         return ScanTarget(raw=raw, host=bucket, port=None, scheme="s3", url=raw)
+
+    if raw.startswith("r2://"):
+        parts = raw[5:].split("/", 2)
+        host = f"{parts[0]}.r2.cloudflarestorage.com" if parts and parts[0] else raw
+        return ScanTarget(raw=raw, host=host, port=None, scheme="r2", url=raw)
 
     host = raw.split("/", 1)[0]
     return ScanTarget(raw=raw, host=host, port=None)
@@ -449,6 +486,10 @@ def main():
         action="store_true",
         help="Ignore cached scan_results.json metadata and scan targets again"
     )
+    ap.add_argument(
+        "--trufflehog-path",
+        help="Full path to trufflehog binary for the trufflehog_s3 module"
+    )
 
     args = ap.parse_args()
 
@@ -458,6 +499,9 @@ def main():
 
     if not args.input:
         ap.error("the following argument is required for scanning: -i/--input")
+
+    if args.trufflehog_path:
+        os.environ["TRUFFLEHOG_PATH"] = args.trufflehog_path
 
     module_names = sorted(AVAILABLE_MODULES) if args.modules == "all" else [
         name.strip() for name in args.modules.split(",") if name.strip()
@@ -497,14 +541,25 @@ def main():
 
     all_results = []
     tasks = []
+    skipped_tasks = 0
 
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         future_context = {}
         for target in targets:
             for module in modules:
+                if not module.supports_target(target):
+                    skipped_tasks += 1
+                    continue
                 future = executor.submit(run_module_scan, module, target, args.timeout, args.sample_size)
                 tasks.append(future)
                 future_context[future] = (module.name, target.raw)
+
+        print(f"[*] Scan tasks: {len(tasks)}")
+        if skipped_tasks:
+            print(f"[*] Skipped incompatible module-target pairs: {skipped_tasks}")
+        if not tasks:
+            print("[!] No module-target pairs to scan after compatibility filtering", file=sys.stderr)
+            sys.exit(1)
 
         completed = 0
         for future in as_completed(tasks):
