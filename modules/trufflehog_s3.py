@@ -5,6 +5,7 @@
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -22,14 +23,16 @@ class TruffleHogS3Module(ScannerModule):
     description = "Runs TruffleHog secret detection against supplied AWS S3 buckets"
     _warning_lock = threading.Lock()
     _warnings = set()
+    _binary_lock = threading.Lock()
+    _cached_binary: Optional[str] = None
+    _prompted_for_binary = False
 
     def scan(self, target: ScanTarget, timeout: int, sample_size: int) -> Iterable[ModuleResult]:
         bucket = S3BucketImpactModule()._bucket_from_target(target)
-        binary = shutil.which("trufflehog")
         if not bucket:
             return
+        binary = self._resolve_binary()
         if not binary:
-            self._warn_once("missing_binary", "trufflehog binary was not found in PATH; trufflehog_s3 scan skipped")
             return
 
         started = time.time()
@@ -148,6 +151,60 @@ class TruffleHogS3Module(ScannerModule):
 
     def _redact_key(self, key: str) -> str:
         return re.sub(r"(?i)(password|passwd|secret|token|api[_-]?key)=([^/&\s]+)", r"\1=<redacted>", key)
+
+    def _resolve_binary(self) -> Optional[str]:
+        binary = shutil.which("trufflehog")
+        if binary:
+            return binary
+
+        with self._binary_lock:
+            if self._cached_binary:
+                return self._cached_binary
+            if self._prompted_for_binary:
+                return None
+            self._prompted_for_binary = True
+
+            self._print_missing_binary_help()
+            if not sys.stdin.isatty():
+                self._warn_once(
+                    "missing_binary_noninteractive",
+                    "trufflehog binary was not found in PATH and stdin is not interactive; trufflehog_s3 scan skipped",
+                )
+                return None
+
+            try:
+                user_path = input("Enter full path to trufflehog binary, or press Enter to skip trufflehog_s3: ").strip()
+            except EOFError:
+                self._warn_once("missing_binary_eof", "trufflehog binary path was not provided; trufflehog_s3 scan skipped")
+                return None
+
+            if not user_path:
+                self._warn_once("missing_binary_skipped", "trufflehog binary path was not provided; trufflehog_s3 scan skipped")
+                return None
+
+            candidate = os.path.abspath(os.path.expanduser(user_path))
+            if not os.path.isfile(candidate) or not os.access(candidate, os.X_OK):
+                self._warn_once(
+                    "missing_binary_invalid_path",
+                    f"provided trufflehog path is not an executable file: {candidate}; trufflehog_s3 scan skipped",
+                )
+                return None
+
+            self._cached_binary = candidate
+            return candidate
+
+    def _print_missing_binary_help(self):
+        print(
+            "[!] trufflehog binary was not found in PATH.\n"
+            "    If TruffleHog is installed through Go or another installer, provide the full path to the executable.\n"
+            "    Helpful commands:\n"
+            "      command -v trufflehog\n"
+            "      go env GOPATH\n"
+            "      ls \"$(go env GOPATH)/bin/trufflehog\"\n"
+            "      find \"$HOME\" -type f -name trufflehog -perm -111 2>/dev/null | head\n",
+            file=sys.stderr,
+            flush=True,
+        )
 
     def _warn_once(self, key: str, message: str):
         with self._warning_lock:

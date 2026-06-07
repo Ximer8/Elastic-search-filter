@@ -1,4 +1,7 @@
 import json
+import os
+import stat
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -8,6 +11,11 @@ from modules.trufflehog_s3 import TruffleHogS3Module
 
 
 class TruffleHogS3ModuleTests(unittest.TestCase):
+    def setUp(self):
+        TruffleHogS3Module._warnings = set()
+        TruffleHogS3Module._cached_binary = None
+        TruffleHogS3Module._prompted_for_binary = False
+
     def test_verified_secret_is_redacted_and_reportable(self):
         payload = {
             "DetectorName": "AWS",
@@ -46,6 +54,37 @@ class TruffleHogS3ModuleTests(unittest.TestCase):
                 sample_size=100,
             ))
         self.assertEqual(results, [])
+
+    def test_prompted_binary_path_is_used_when_not_in_path(self):
+        payload = {
+            "DetectorName": "AWS",
+            "DecoderName": "PLAIN",
+            "Verified": False,
+            "Raw": "secret-value-example",
+            "SourceMetadata": {"Data": {"S3": {"bucket": "company-prod", "key": "config/app.env"}}},
+        }
+        completed = SimpleNamespace(returncode=0, stdout=json.dumps(payload) + "\n", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            binary = os.path.join(tmpdir, "trufflehog")
+            with open(binary, "w", encoding="utf-8") as handle:
+                handle.write("#!/bin/sh\n")
+            os.chmod(binary, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+
+            with patch("modules.trufflehog_s3.shutil.which", return_value=None):
+                with patch("modules.trufflehog_s3.sys.stdin.isatty", return_value=True):
+                    with patch("builtins.input", return_value=binary):
+                        with patch("modules.trufflehog_s3.subprocess.run", return_value=completed) as run:
+                            results = list(TruffleHogS3Module().scan(
+                                ScanTarget(raw="s3://company-prod", host="company-prod"),
+                                timeout=3,
+                                sample_size=100,
+                            ))
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(run.call_args.args[0], [
+            binary, "s3", "--bucket=company-prod", "--json", "--no-update",
+        ])
 
 
 if __name__ == "__main__":
